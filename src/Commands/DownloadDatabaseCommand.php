@@ -48,7 +48,9 @@ class DownloadDatabaseCommand extends Command
 
     public function handle(): int
     {
-        $this->logStart();
+        if ($this->getOutput()->isVerbose()) {
+            $this->logStart();
+        }
 
         if (! $this->canRunInCurrentEnvironment()) {
             $this->logAndOutputError('This command cannot be executed in production environment');
@@ -116,7 +118,7 @@ class DownloadDatabaseCommand extends Command
     private function prepare(): void
     {
         $this->initializeConfig();
-        $this->components->task('Clearing cache', fn () => $this->call('cache:clear'));
+        $this->callSilently('cache:clear');
     }
 
     private function ensureLocalDirectoryExists(): void
@@ -310,42 +312,46 @@ class DownloadDatabaseCommand extends Command
 
     /**
      * Get existing downloaded files from the local path.
+     * Files are sorted with .sql first (ready to import), then .sql.gz, then .zip.
      *
      * @return array<string>
      */
     private function getExistingFiles(): array
     {
-        $files = [];
+        $sqlFiles = [];
+        $gzFiles = [];
+        $zipFiles = [];
 
         if (! File::exists($this->localPath)) {
-            return $files;
-        }
-
-        // Check for zip files
-        foreach (File::glob("{$this->localPath}*.zip") as $file) {
-            $files[] = $file;
+            return [];
         }
 
         // Check for extracted SQL files in db-dumps directory
         $dbDumpsPath = "{$this->localPath}db-dumps/";
         if (File::exists($dbDumpsPath)) {
             foreach (File::glob("{$dbDumpsPath}*.sql") as $file) {
-                $files[] = $file;
+                $sqlFiles[] = $file;
             }
             foreach (File::glob("{$dbDumpsPath}*.sql.gz") as $file) {
-                $files[] = $file;
+                $gzFiles[] = $file;
             }
         }
 
         // Check for SQL files directly in local path
         foreach (File::glob("{$this->localPath}*.sql") as $file) {
-            $files[] = $file;
+            $sqlFiles[] = $file;
         }
         foreach (File::glob("{$this->localPath}*.sql.gz") as $file) {
-            $files[] = $file;
+            $gzFiles[] = $file;
         }
 
-        return array_unique($files);
+        // Check for zip files
+        foreach (File::glob("{$this->localPath}*.zip") as $file) {
+            $zipFiles[] = $file;
+        }
+
+        // Return sorted: .sql first (ready to import), then .sql.gz, then .zip
+        return array_unique(array_merge($sqlFiles, $gzFiles, $zipFiles));
     }
 
     private function processLocalFile(string $filePath): string
@@ -560,6 +566,7 @@ class DownloadDatabaseCommand extends Command
         if ($this->isPvAvailable()) {
             $this->importSqlFileWithProgress($escapedFile, $escapedDbName);
         } else {
+            $this->info("If you want to see the progress, install pv with: brew install pv");
             $this->components->task(
                 'Importing SQL file',
                 function () use ($escapedDbName, $escapedFile) {
