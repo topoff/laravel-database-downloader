@@ -21,66 +21,24 @@ You can publish the config file with:
 php artisan vendor:publish --tag="database-downloader-config"
 ```
 
-This is the contents of the published config file:
-
-```php
-return [
-    /*
-     * The server where the live dumps are located.
-     */
-    'server' => env('DB_DOWNLOADER_SERVER', 'your-server.com'),
-
-    /*
-     * The SSH user for the live server.
-     */
-    'ssh_user' => env('DB_DOWNLOADER_SSH_USER', 'topoff'),
-
-    /*
-     * The SSH host for the backup server.
-     */
-    'backup_ssh_server' => env('DB_DOWNLOADER_BACKUP_SSH_SERVER', 'umzugof.ssh.cloud.hostpoint.ch'),
-
-    /*
-     * The SSH user for the backup server.
-     */
-    'backup_ssh_user' => env('DB_DOWNLOADER_BACKUP_SSH_USER', 'umzugof'),
-
-    /*
-     * The path on the backup server where the backups are stored.
-     * {tenant} will be replaced by the tenant name.
-     */
-    'backup_path_template' => env('DB_DOWNLOADER_BACKUP_PATH_TEMPLATE', '/home/umzugof/live-backups/{tenant}/{backup_name}/'),
-
-    /*
-     * The local path where the dumps will be stored temporarily.
-     */
-    'local_path' => database_path('import/dumps/'),
-
-    /*
-     * Whether to use the defaults-extra-file for the mysql command.
-     */
-    'use_local_defaults_extra_file' => true,
-];
-```
-
 ## Usage
 
-The package provides a command to download and import the database:
+The package provides an interactive command to download and import the database:
 
 ```bash
 php artisan db:download
 ```
 
+You'll be prompted to:
+1. **Select the data source**: `backup`, `staging`, or `live`
+2. **Select dump type** (if staging or live): `Full dump` or `Only structure`
+
 ### Options
 
-- `--killDbFirst`: If the DB should be dropped first if it exists.
-- `--source=`: The source of the data: `backup` (default), `live-dump`, or `live-dump-structure`.
-- `--files`: If the files from `public/storage` should be downloaded and imported as well.
-- `--userlogger`: If it should import the userlogger db instead of the default mysql db (Specific to some project setups).
-- `--from-staging`: If it should import the live db from the staging server instead of the live server.
-- `--file-path=`: If you want to provide a specific local file path to import.
-- `--tenant=`: The tenant name (used for backup path resolution).
-- `--connection=`: The database connection to use.
+- `--dropExisting`: Drop the database before import if it exists.
+- `--files`: Download and import files from `public/storage`.
+- `--dbName=`: Use a different database name instead of the default.
+- `--import-from-local-file-path=`: Import from a specific local file instead of downloading.
 
 ### Events
 
@@ -95,7 +53,6 @@ Event::listen(
 ```
 
 The event contains the following properties:
-- `tenant`: The name of the tenant that was imported.
 - `filesImported`: A boolean indicating if the `--files` option was used.
 
 ## Laravel Boost Integration

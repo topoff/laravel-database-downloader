@@ -12,9 +12,9 @@ it('can run the db:download command help', function (): void {
 it('dispatches DatabaseImported event', function (): void {
     Event::fake();
 
-    DatabaseImported::dispatch('test-tenant', true);
+    DatabaseImported::dispatch(true);
 
-    Event::assertDispatched(DatabaseImported::class, fn ($event) => $event->tenant === 'test-tenant' && $event->filesImported === true);
+    Event::assertDispatched(DatabaseImported::class, fn ($event) => $event->filesImported === true);
 });
 
 it('prevents execution in production environment', function (): void {
@@ -23,8 +23,8 @@ it('prevents execution in production environment', function (): void {
     App::shouldReceive('environment')->andReturn('production');
 
     $this->artisan('db:download')
-        ->expectsOutputToContain('This command could not be executed, because it run in Env: production')
-        ->assertExitCode(0);
+        ->expectsOutputToContain('This command cannot be executed in production environment')
+        ->assertExitCode(1);
 });
 
 it('has the correct signature and options', function (): void {
@@ -32,7 +32,6 @@ it('has the correct signature and options', function (): void {
     $signature = $command->getNativeDefinition();
 
     expect($signature->hasOption('dropExisting'))->toBeTrue()
-        ->and($signature->hasOption('source'))->toBeTrue()
         ->and($signature->hasOption('files'))->toBeTrue()
         ->and($signature->hasOption('dbName'))->toBeTrue()
         ->and($signature->hasOption('import-from-local-file-path'))->toBeTrue();

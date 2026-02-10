@@ -4,12 +4,17 @@ return [
     /*
      * The server where the live dumps are located.
      */
-    'server' => env('DB_DOWNLOADER_SERVER', 'your-server.com'),
+    'live_server' => env('DB_DOWNLOADER_SERVER', 'your-server.com'),
 
     /*
      * The SSH user for the live server.
      */
-    'ssh_user' => env('DB_DOWNLOADER_SSH_USER', 'your-ssh-user'),
+    'live_ssh_user' => env('DB_DOWNLOADER_SSH_USER', 'your-ssh-user'),
+
+    /*
+     * The path to the MySQL config file on the live server.
+     */
+    'mysql_config_path' => env('DB_DOWNLOADER_MYSQL_CONFIG_PATH', '~/mysql-login.cnf'),
 
     /*
      * The database.connections.key to use
@@ -27,6 +32,11 @@ return [
     'staging_ssh_user' => env('DB_DOWNLOADER_STAGING_SSH_USER', 'your-ssh-user'),
 
     /*
+     * The path to the MySQL config file on the staging server.
+     */
+    'staging_mysql_config_path' => env('DB_DOWNLOADER_STAGING_MYSQL_CONFIG_PATH', '~/mysql-login.cnf'),
+
+    /*
      * The SSH host for the backup server.
      */
     'backup_ssh_server' => env('DB_DOWNLOADER_BACKUP_SSH_SERVER', 'your-backup-server.com'),
@@ -38,9 +48,9 @@ return [
 
     /*
      * The path on the backup server where the backups are stored.
-     * {tenant} will be replaced by the tenant name.
+     * {backup_name} will be replaced by the backup name from config.
      */
-    'backup_path_template' => env('DB_DOWNLOADER_BACKUP_PATH_TEMPLATE', '/path/to/your/live-backups/{tenant}/{backup_name}/'),
+    'backup_path_template' => env('DB_DOWNLOADER_BACKUP_PATH_TEMPLATE', '/path/to/your/live-backups/{backup_name}/'),
 
     /*
      * The local path where the dumps will be stored temporarily.

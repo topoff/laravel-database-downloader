@@ -14,15 +14,12 @@ use Topoff\DatabaseDownloader\Events\DatabaseImported;
 class DownloadDatabaseCommand extends Command
 {
     protected $signature = 'db:download
-    {--dropExisting : Drop the database before import if it exists} 
-    {--source=backup : Data source: backup|live-dump|live-dump-structure|staging-dump|staging-dump-structure} 
-    {--files : Download and import files from public/storage} 
     {--dbName= : Use a different database name}
-    {--import-from-local-file-path= : Import from a specific local file instead of downloading}';
+    {--import-from-local-file-path= : Import from a specific local file instead of downloading}
+    {--dropExisting : Drop the database before import if it exists} 
+    {--files : Download and import files from public/storage}';
 
     protected $description = 'Import the live database from the live or backup server to local';
-
-    private string $tenant;
 
     private string $localPath;
 
@@ -38,30 +35,20 @@ class DownloadDatabaseCommand extends Command
 
     private ?string $mysqlConfigPath = null;
 
-    private const array ALLOWED_SOURCES = [
-        'backup',
-        'live-dump',
-        'live-dump-structure',
-        'staging-dump',
-        'staging-dump-structure',
-    ];
+    private string $source;
 
     public function handle(): int
     {
-        if ($this->getOutput()->isVerbose()) {
-            $this->logStart();
-        }
-
         if (! $this->canRunInCurrentEnvironment()) {
             $this->logAndOutputError('This command cannot be executed in production environment');
 
             return self::FAILURE;
         }
 
-        if (! $this->validateSource()) {
-            $this->logAndOutputError('Invalid source. Allowed: '.implode(', ', self::ALLOWED_SOURCES));
+        $this->source = $this->determineSource();
 
-            return self::FAILURE;
+        if ($this->getOutput()->isVerbose()) {
+            $this->logStart();
         }
 
         try {
@@ -96,10 +83,33 @@ class DownloadDatabaseCommand extends Command
         }
     }
 
+    private function determineSource(): string
+    {
+        $environment = $this->components->choice(
+            'Select the data source',
+            ['backup', 'staging', 'live'],
+            'backup'
+        );
+
+        if ($environment === 'backup') {
+            return 'backup';
+        }
+
+        $dumpType = $this->components->choice(
+            'Select dump type',
+            ['Full dump', 'Only structure'],
+            'Full dump'
+        );
+
+        $structureSuffix = $dumpType === 'Only structure' ? '-structure' : '';
+
+        return "{$environment}-dump{$structureSuffix}";
+    }
+
     private function logStart(): void
     {
         $this->components->info('Chosen Command Options:');
-        $this->components->twoColumnDetail('Source', $this->option('source'));
+        $this->components->twoColumnDetail('Source', $this->source);
         $this->components->twoColumnDetail('Drop Existing', $this->option('dropExisting') ? 'Yes' : 'No');
         $this->components->twoColumnDetail('Import Files', $this->option('files') ? 'Yes' : 'No');
         $this->newLine();
@@ -108,11 +118,6 @@ class DownloadDatabaseCommand extends Command
     private function canRunInCurrentEnvironment(): bool
     {
         return ! App::environment('production');
-    }
-
-    private function validateSource(): bool
-    {
-        return in_array($this->option('source'), self::ALLOWED_SOURCES, true);
     }
 
     private function prepare(): void
@@ -134,7 +139,6 @@ class DownloadDatabaseCommand extends Command
     {
         $dbConnection = config('database-downloader.mysql_connection', 'mysql');
 
-        $this->tenant = $this->validateTenant(config('app.tenant', 'default'));
         $this->localPath = $this->validateLocalPath(config('database-downloader.local_path'));
         $this->dbName = $this->validateDbName(
             $this->option('dbName') ?? config("database.connections.{$dbConnection}.database")
@@ -144,15 +148,6 @@ class DownloadDatabaseCommand extends Command
 
         $this->backupPath = $this->buildBackupPath();
         $this->createMysqlConfigFile($dbConnection);
-    }
-
-    private function validateTenant(string $tenant): string
-    {
-        if ($tenant === '' || $tenant === '0' || preg_match('/[^a-zA-Z0-9_-]/', $tenant)) {
-            throw new RuntimeException('Invalid tenant name. Only alphanumeric, underscore, and hyphen allowed.');
-        }
-
-        return $tenant;
     }
 
     private function validateLocalPath(string $path): string
@@ -189,8 +184,8 @@ class DownloadDatabaseCommand extends Command
     private function buildBackupPath(): string
     {
         return str_replace(
-            ['{tenant}', '{backup_name}'],
-            [$this->tenant, config('backup.backup.name', 'default')],
+            '{backup_name}',
+            config('backup.backup.name', 'default'),
             config('database-downloader.backup_path_template')
         );
     }
@@ -262,9 +257,9 @@ class DownloadDatabaseCommand extends Command
             return $existingFile;
         }
 
-        $this->components->task('Preparing local directory', fn () => $this->ensureLocalDirectoryExists());
+        $this->ensureLocalDirectoryExists();
 
-        return $this->downloadSqlData($this->option('source'));
+        return $this->downloadSqlData($this->source);
     }
 
     /**
@@ -407,6 +402,10 @@ class DownloadDatabaseCommand extends Command
     {
         $this->components->warn('⚠️  Remote dump will temporarily block the database');
 
+        if (! $this->components->confirm('Do you want to continue?', false)) {
+            throw new RuntimeException('Remote dump cancelled by user');
+        }
+
         $isStaging = Str::startsWith($source, 'staging');
         $config = $this->getRemoteServerConfig($isStaging);
         $this->validateRemoteConfig($config['host'], $config['ssh_user']);
@@ -431,12 +430,13 @@ class DownloadDatabaseCommand extends Command
         return [
             'host' => config("database-downloader.{$prefix}server"),
             'ssh_user' => config("database-downloader.{$prefix}ssh_user"),
+            'mysql_config_path' => config("database-downloader.{$prefix}mysql_config_path"),
         ];
     }
 
     private function buildRemoteDumpCommand(array $config, string $optionNoData, string $localFile): string
     {
-        $remoteConfig = escapeshellarg("/etc/{$this->tenant}/mysql-login-config.cnf");
+        $remoteConfig = escapeshellarg((string) $config['mysql_config_path']);
         $escapedDbName = escapeshellarg($this->dbName);
         $escapedHost = escapeshellarg((string) $config['host']);
         $escapedUser = escapeshellarg((string) $config['ssh_user']);
@@ -547,7 +547,6 @@ class DownloadDatabaseCommand extends Command
     /**
      * Escape a MySQL identifier (database name, charset, collation) for use in SQL via shell.
      * Only allows alphanumeric characters, underscores, and hyphens.
-     * Backticks are escaped for shell interpretation.
      */
     private function escapeMysqlIdentifier(string $identifier): string
     {
@@ -555,7 +554,7 @@ class DownloadDatabaseCommand extends Command
             throw new RuntimeException("Invalid MySQL identifier: {$identifier}");
         }
 
-        return "\`{$identifier}\`";
+        return $identifier;
     }
 
     private function importSqlFile(string $fileWithPath): void
@@ -604,7 +603,7 @@ class DownloadDatabaseCommand extends Command
 
     private function dispatchEvents(): void
     {
-        DatabaseImported::dispatch($this->tenant, (bool) $this->option('files'));
+        DatabaseImported::dispatch((bool) $this->option('files'));
     }
 
     private function cleanup(): void
@@ -664,11 +663,5 @@ class DownloadDatabaseCommand extends Command
     {
         $this->info($info);
         Log::info($info);
-    }
-
-    private function logAndOutputDebug(string $line): void
-    {
-        $this->line($line);
-        Log::debug($line);
     }
 }
