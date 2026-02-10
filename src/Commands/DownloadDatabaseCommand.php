@@ -14,6 +14,7 @@ use Topoff\DatabaseDownloader\Events\DatabaseImported;
 class DownloadDatabaseCommand extends Command
 {
     protected $signature = 'db:download
+    {--source=backup : Data source: backup|staging-dump|staging-dump-structure|live-dump|live-dump-structure}
     {--dbName= : Use a different database name}
     {--import-from-local-file-path= : Import from a specific local file instead of downloading}
     {--dropExisting : Drop the database before import if it exists} 
@@ -85,6 +86,11 @@ class DownloadDatabaseCommand extends Command
 
     protected function determineSource(): string
     {
+        // If source is provided via option or running non-interactively, use it
+        if ($this->option('source') || $this->option('no-interaction')) {
+            return $this->option('source') ?? 'backup';
+        }
+
         $environment = $this->components->choice(
             'Select the data source',
             ['backup', 'staging', 'live'],
@@ -129,8 +135,11 @@ class DownloadDatabaseCommand extends Command
     protected function ensureLocalDirectoryExists(): void
     {
         if (File::exists($this->localPath)) {
-            if (! $this->components->confirm('The local download directory already exists. Delete it and download fresh?', true)) {
-                throw new RuntimeException('Download cancelled by user. Local directory not cleared.');
+            // In non-interactive mode, always delete without asking
+            if (! $this->option('no-interaction')) {
+                if (! $this->components->confirm('The local download directory already exists. Delete it and download fresh?', true)) {
+                    throw new RuntimeException('Download cancelled by user. Local directory not cleared.');
+                }
             }
 
             File::deleteDirectory($this->localPath);
@@ -279,6 +288,11 @@ class DownloadDatabaseCommand extends Command
             return null;
         }
 
+        // In non-interactive mode, use the first existing file
+        if ($this->option('no-interaction')) {
+            return $this->processLocalFile($existingFiles[0]);
+        }
+
         $choices = array_merge(
             array_map(fn (string $file): string => "Use: {$file}", $existingFiles),
             [
@@ -406,8 +420,11 @@ class DownloadDatabaseCommand extends Command
     {
         $this->components->warn('⚠️  Remote dump will temporarily block the database');
 
-        if (! $this->components->confirm('Do you want to continue?', false)) {
-            throw new RuntimeException('Remote dump cancelled by user');
+        // In non-interactive mode, skip confirmation
+        if (! $this->option('no-interaction')) {
+            if (! $this->components->confirm('Do you want to continue?', false)) {
+                throw new RuntimeException('Remote dump cancelled by user');
+            }
         }
 
         $isStaging = Str::startsWith($source, 'staging');
@@ -621,7 +638,8 @@ class DownloadDatabaseCommand extends Command
         }
 
         if (File::exists($this->localPath)) {
-            if ($this->components->confirm('Delete downloaded temporary files?', true)) {
+            // In non-interactive mode, always delete
+            if ($this->option('no-interaction') || $this->components->confirm('Delete downloaded temporary files?', true)) {
                 $this->components->task('Removing temporary files', fn () => File::deleteDirectory($this->localPath));
             } else {
                 $this->components->info('Temporary files kept in: '.$this->localPath);

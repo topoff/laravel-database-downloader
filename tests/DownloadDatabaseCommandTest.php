@@ -31,7 +31,8 @@ it('has the correct signature and options', function (): void {
     $command = app()->make(\Topoff\DatabaseDownloader\Commands\DownloadDatabaseCommand::class);
     $signature = $command->getNativeDefinition();
 
-    expect($signature->hasOption('dropExisting'))->toBeTrue()
+    expect($signature->hasOption('source'))->toBeTrue()
+        ->and($signature->hasOption('dropExisting'))->toBeTrue()
         ->and($signature->hasOption('files'))->toBeTrue()
         ->and($signature->hasOption('dbName'))->toBeTrue()
         ->and($signature->hasOption('import-from-local-file-path'))->toBeTrue();
