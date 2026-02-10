@@ -117,7 +117,6 @@ class DownloadDatabaseCommand extends Command
     {
         $this->initializeConfig();
         $this->components->task('Clearing cache', fn () => $this->call('cache:clear'));
-        $this->components->task('Preparing local directory', fn () => $this->ensureLocalDirectoryExists());
     }
 
     private function ensureLocalDirectoryExists(): void
@@ -256,7 +255,97 @@ class DownloadDatabaseCommand extends Command
             return $this->processLocalFile($localFilePath);
         }
 
+        $existingFile = $this->handleExistingFiles();
+        if ($existingFile !== null) {
+            return $existingFile;
+        }
+
+        $this->components->task('Preparing local directory', fn () => $this->ensureLocalDirectoryExists());
+
         return $this->downloadSqlData($this->option('source'));
+    }
+
+    /**
+     * Check for existing files and prompt user for action.
+     *
+     * @return string|null Returns file path to use, or null to download fresh
+     */
+    private function handleExistingFiles(): ?string
+    {
+        $existingFiles = $this->getExistingFiles();
+
+        if (empty($existingFiles)) {
+            return null;
+        }
+
+        $choices = array_merge(
+            array_map(fn (string $file) => "Use: {$file}", $existingFiles),
+            [
+                'Enter custom path',
+                'Ignore and download fresh',
+            ]
+        );
+
+        $choice = $this->components->choice(
+            'Found existing files. What would you like to do?',
+            $choices,
+            0
+        );
+
+        if ($choice === 'Ignore and download fresh') {
+            return null;
+        }
+
+        if ($choice === 'Enter custom path') {
+            $customPath = $this->components->ask('Enter the path to the SQL file');
+
+            return $this->processLocalFile($customPath);
+        }
+
+        // Extract file path from choice (remove "Use: " prefix)
+        $selectedFile = Str::after($choice, 'Use: ');
+
+        return $this->processLocalFile($selectedFile);
+    }
+
+    /**
+     * Get existing downloaded files from the local path.
+     *
+     * @return array<string>
+     */
+    private function getExistingFiles(): array
+    {
+        $files = [];
+
+        if (! File::exists($this->localPath)) {
+            return $files;
+        }
+
+        // Check for zip files
+        foreach (File::glob("{$this->localPath}*.zip") as $file) {
+            $files[] = $file;
+        }
+
+        // Check for extracted SQL files in db-dumps directory
+        $dbDumpsPath = "{$this->localPath}db-dumps/";
+        if (File::exists($dbDumpsPath)) {
+            foreach (File::glob("{$dbDumpsPath}*.sql") as $file) {
+                $files[] = $file;
+            }
+            foreach (File::glob("{$dbDumpsPath}*.sql.gz") as $file) {
+                $files[] = $file;
+            }
+        }
+
+        // Check for SQL files directly in local path
+        foreach (File::glob("{$this->localPath}*.sql") as $file) {
+            $files[] = $file;
+        }
+        foreach (File::glob("{$this->localPath}*.sql.gz") as $file) {
+            $files[] = $file;
+        }
+
+        return array_unique($files);
     }
 
     private function processLocalFile(string $filePath): string
@@ -429,10 +518,7 @@ class DownloadDatabaseCommand extends Command
             fn () => $this->createDatabase()
         );
 
-        $this->components->task(
-            'Importing SQL file',
-            fn () => $this->importSqlFile($fileWithPath)
-        );
+        $this->importSqlFile($fileWithPath);
     }
 
     private function dropDatabase(): void
@@ -453,8 +539,9 @@ class DownloadDatabaseCommand extends Command
     }
 
     /**
-     * Escape a MySQL identifier (database name, charset, collation) for use in SQL.
+     * Escape a MySQL identifier (database name, charset, collation) for use in SQL via shell.
      * Only allows alphanumeric characters, underscores, and hyphens.
+     * Backticks are escaped for shell interpretation.
      */
     private function escapeMysqlIdentifier(string $identifier): string
     {
@@ -462,7 +549,7 @@ class DownloadDatabaseCommand extends Command
             throw new RuntimeException("Invalid MySQL identifier: {$identifier}");
         }
 
-        return "`{$identifier}`";
+        return "\`{$identifier}\`";
     }
 
     private function importSqlFile(string $fileWithPath): void
@@ -470,8 +557,42 @@ class DownloadDatabaseCommand extends Command
         $escapedDbName = escapeshellarg($this->dbName);
         $escapedFile = escapeshellarg($fileWithPath);
 
-        $command = "{$this->mysqlBasicCommand} {$escapedDbName} < {$escapedFile}";
-        $this->executeShellCommand($command);
+        if ($this->isPvAvailable()) {
+            $this->importSqlFileWithProgress($escapedFile, $escapedDbName);
+        } else {
+            $this->components->task(
+                'Importing SQL file',
+                function () use ($escapedDbName, $escapedFile) {
+                    $command = "{$this->mysqlBasicCommand} {$escapedDbName} < {$escapedFile}";
+                    $this->executeShellCommand($command);
+                }
+            );
+        }
+    }
+
+    private function isPvAvailable(): bool
+    {
+        exec('which pv 2>/dev/null', $output, $resultCode);
+
+        return $resultCode === 0;
+    }
+
+    private function importSqlFileWithProgress(string $escapedFile, string $escapedDbName): void
+    {
+        $this->components->twoColumnDetail('Importing SQL file', '<fg=yellow>IN PROGRESS</>');
+
+        $command = "pv -p -e -t -a {$escapedFile} | {$this->mysqlBasicCommand} {$escapedDbName}";
+
+        if ($this->getOutput()->isVerbose()) {
+            $this->components->twoColumnDetail('Command', $command);
+        }
+
+        $resultCode = 0;
+        passthru($command, $resultCode);
+
+        if ($resultCode !== 0) {
+            throw new RuntimeException("SQL import failed with exit code {$resultCode}");
+        }
     }
 
     private function dispatchEvents(): void
