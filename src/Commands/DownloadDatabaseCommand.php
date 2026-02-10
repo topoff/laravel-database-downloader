@@ -38,7 +38,7 @@ class DownloadDatabaseCommand extends Command
 
     private ?string $mysqlConfigPath = null;
 
-    private const ALLOWED_SOURCES = [
+    private const array ALLOWED_SOURCES = [
         'backup',
         'live-dump',
         'live-dump-structure',
@@ -69,7 +69,7 @@ class DownloadDatabaseCommand extends Command
 
             $fileToImport = $this->getFileToImport();
 
-            if (empty($fileToImport) || ! File::exists($fileToImport)) {
+            if (in_array($fileToImport, [null, '', '0'], true) || ! File::exists($fileToImport)) {
                 $this->logAndOutputInfo('No file to import found');
 
                 return self::FAILURE;
@@ -148,7 +148,7 @@ class DownloadDatabaseCommand extends Command
 
     private function validateTenant(string $tenant): string
     {
-        if (empty($tenant) || preg_match('/[^a-zA-Z0-9_-]/', $tenant)) {
+        if ($tenant === '' || $tenant === '0' || preg_match('/[^a-zA-Z0-9_-]/', $tenant)) {
             throw new RuntimeException('Invalid tenant name. Only alphanumeric, underscore, and hyphen allowed.');
         }
 
@@ -157,7 +157,7 @@ class DownloadDatabaseCommand extends Command
 
     private function validateLocalPath(string $path): string
     {
-        if (empty($path)) {
+        if ($path === '' || $path === '0') {
             throw new RuntimeException('Local path cannot be empty');
         }
 
@@ -174,7 +174,7 @@ class DownloadDatabaseCommand extends Command
 
     private function validateDbName(string $dbName): string
     {
-        if (empty($dbName)) {
+        if ($dbName === '' || $dbName === '0') {
             throw new RuntimeException('Database name cannot be empty');
         }
 
@@ -234,9 +234,9 @@ class DownloadDatabaseCommand extends Command
     {
         return implode("\n", [
             '[client]',
-            'user = '.escapeshellarg($credentials['username']),
+            'user = '.escapeshellarg((string) $credentials['username']),
             'password = '.escapeshellarg($credentials['password'] ?? ''),
-            'host = '.escapeshellarg($credentials['host']),
+            'host = '.escapeshellarg((string) $credentials['host']),
             'port = '.escapeshellarg((string) $credentials['port']),
             '',
         ]);
@@ -276,12 +276,12 @@ class DownloadDatabaseCommand extends Command
     {
         $existingFiles = $this->getExistingFiles();
 
-        if (empty($existingFiles)) {
+        if ($existingFiles === []) {
             return null;
         }
 
         $choices = array_merge(
-            array_map(fn (string $file) => "Use: {$file}", $existingFiles),
+            array_map(fn (string $file): string => "Use: {$file}", $existingFiles),
             [
                 'Enter custom path',
                 'Ignore and download fresh',
@@ -361,13 +361,13 @@ class DownloadDatabaseCommand extends Command
         if (Str::endsWith($filePath, '.zip')) {
             $outputDir = escapeshellarg(dirname($filePath));
             $escapedPath = escapeshellarg($filePath);
-            $this->executeShellCommand("unzip -o {$escapedPath} -d {$outputDir}", "Unzip File: {$filePath}");
+            $this->executeShellCommand("unzip -o {$escapedPath} -d {$outputDir}");
             $filePath = Str::replaceLast('.zip', '.sql.gz', $filePath);
         }
 
         if (Str::endsWith($filePath, '.sql.gz')) {
             $escapedPath = escapeshellarg($filePath);
-            $this->executeShellCommand("gunzip -f {$escapedPath}", "Gunzip File: {$filePath}");
+            $this->executeShellCommand("gunzip -f {$escapedPath}");
             $filePath = Str::replaceLast('.sql.gz', '.sql', $filePath);
         }
 
@@ -418,7 +418,7 @@ class DownloadDatabaseCommand extends Command
 
         $this->components->task(
             "Dumping from {$config['host']}",
-            fn () => $this->executeShellCommand($command)
+            fn (): ?string => $this->executeShellCommand($command)
         );
 
         return $localFile;
@@ -438,8 +438,8 @@ class DownloadDatabaseCommand extends Command
     {
         $remoteConfig = escapeshellarg("/etc/{$this->tenant}/mysql-login-config.cnf");
         $escapedDbName = escapeshellarg($this->dbName);
-        $escapedHost = escapeshellarg($config['host']);
-        $escapedUser = escapeshellarg($config['ssh_user']);
+        $escapedHost = escapeshellarg((string) $config['host']);
+        $escapedUser = escapeshellarg((string) $config['ssh_user']);
         $escapedLocalFile = escapeshellarg($localFile);
 
         return "ssh {$escapedUser}@{$escapedHost} \"mysqldump --defaults-extra-file={$remoteConfig} --databases {$escapedDbName}{$optionNoData}\" > {$escapedLocalFile}";
@@ -447,7 +447,7 @@ class DownloadDatabaseCommand extends Command
 
     private function validateRemoteConfig(?string $host, ?string $sshUser): void
     {
-        if (empty($host) || empty($sshUser)) {
+        if (in_array($host, [null, '', '0'], true) || in_array($sshUser, [null, '', '0'], true)) {
             throw new RuntimeException('Remote server configuration is missing or invalid');
         }
     }
@@ -459,14 +459,14 @@ class DownloadDatabaseCommand extends Command
 
         $this->validateRemoteConfig($host, $sshUser);
 
-        $escapedUser = escapeshellarg($sshUser);
-        $escapedHost = escapeshellarg($host);
+        $escapedUser = escapeshellarg((string) $sshUser);
+        $escapedHost = escapeshellarg((string) $host);
         $escapedBackupPath = escapeshellarg($this->backupPath);
 
         $latestFileCommand = "ssh {$escapedUser}@{$escapedHost} \"ls -t {$escapedBackupPath} | head -1\"";
         $fileName = $this->executeShellCommand($latestFileCommand);
 
-        if (empty($fileName)) {
+        if (in_array($fileName, [null, '', '0'], true)) {
             $this->components->warn('No backup file found');
 
             return null;
@@ -484,7 +484,7 @@ class DownloadDatabaseCommand extends Command
         // Download backup file
         $rsyncCommand = "rsync -vzrlptD {$escapedUser}@{$escapedHost}:{$escapedRemotePath} {$escapedLocalPath}";
 
-        $this->components->task("Downloading File with Command: {$rsyncCommand}", function () use ($rsyncCommand, $escapedUser, $escapedHost, $escapedRemotePath, $escapedLocalPath) {
+        $this->components->task("Downloading File with Command: {$rsyncCommand}", function () use ($rsyncCommand): void {
             $output = [];
             $resultCode = -1;
             exec($rsyncCommand, $output, $resultCode);
@@ -497,12 +497,12 @@ class DownloadDatabaseCommand extends Command
         // Extract and decompress
         $escapedZipFile = escapeshellarg("{$this->localPath}{$fileName}");
         $this->components->task('Extracting backup archive',
-            fn () => $this->executeShellCommand("unzip -o {$escapedZipFile} -d {$escapedLocalPath}")
+            fn (): ?string => $this->executeShellCommand("unzip -o {$escapedZipFile} -d {$escapedLocalPath}")
         );
 
         $gzFile = escapeshellarg("{$this->localPath}db-dumps/mysql-{$this->dbName}.sql.gz");
         $this->components->task('Decompressing SQL file',
-            fn () => $this->executeShellCommand("gunzip -f {$gzFile}")
+            fn (): ?string => $this->executeShellCommand("gunzip -f {$gzFile}")
         );
 
         return "{$this->localPath}db-dumps/mysql-{$this->dbName}.sql";
@@ -566,10 +566,10 @@ class DownloadDatabaseCommand extends Command
         if ($this->isPvAvailable()) {
             $this->importSqlFileWithProgress($escapedFile, $escapedDbName);
         } else {
-            $this->info("If you want to see the progress, install pv with: brew install pv");
+            $this->info('If you want to see the progress, install pv with: brew install pv');
             $this->components->task(
                 'Importing SQL file',
-                function () use ($escapedDbName, $escapedFile) {
+                function () use ($escapedDbName, $escapedFile): void {
                     $command = "{$this->mysqlBasicCommand} {$escapedDbName} < {$escapedFile}";
                     $this->executeShellCommand($command);
                 }
@@ -636,7 +636,7 @@ class DownloadDatabaseCommand extends Command
             $this->logCommandFailure($resultCode, $output);
         }
 
-        if ($this->getOutput()->isVerbose() && ! empty($output)) {
+        if ($this->getOutput()->isVerbose() && $output !== []) {
             $this->components->bulletList($output);
         }
 
@@ -647,7 +647,7 @@ class DownloadDatabaseCommand extends Command
     {
         $errorMessage = "Command failed with exit code {$exitCode}";
 
-        if (! empty($output)) {
+        if ($output !== []) {
             $errorMessage .= ":\n".implode("\n", $output);
         }
 

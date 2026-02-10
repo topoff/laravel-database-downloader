@@ -2,6 +2,4 @@
 
 namespace Topoff\DatabaseDownloader;
 
-class DatabaseDownloader
-{
-}
+class DatabaseDownloader {}

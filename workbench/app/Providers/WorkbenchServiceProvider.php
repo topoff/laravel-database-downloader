@@ -26,10 +26,10 @@ class WorkbenchServiceProvider extends ServiceProvider
 
     /**
      * Configure Laravel Boost to work with package development.
-     * 
+     *
      * This fixes the base path and guidelines path for Boost commands
      * so they work correctly when developing packages with Testbench.
-     * 
+     *
      * @see https://denniskoch.dev/articles/2026-01-26-laravel-boost-for-package-development/
      */
     private function configureLaravelBoostForPackageDevelopment(): void

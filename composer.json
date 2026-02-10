@@ -23,6 +23,7 @@
         "phpstan/extension-installer": "^1.4",
         "phpstan/phpstan-deprecation-rules": "^2.0",
         "phpstan/phpstan-phpunit": "^2.0",
+        "rector/rector": "^2.3",
         "spatie/laravel-ray": "^1.35"
     },
     "autoload": {
@@ -60,7 +61,9 @@
         "lint": [
             "@php vendor/bin/pint --ansi",
             "@php vendor/bin/phpstan analyse --verbose --ansi"
-        ]
+        ],
+        "rector": "vendor/bin/rector",
+        "rector-dry": "vendor/bin/rector --dry-run"
     },
     "config": {
         "sort-packages": true,

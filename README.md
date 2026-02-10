@@ -120,7 +120,51 @@ This package has been thoroughly reviewed for security vulnerabilities:
 
 For detailed security information, see [SECURITY.md](SECURITY.md).
 
-## Testing
+## Development
+
+### Code Quality Tools
+
+This package uses several tools to maintain code quality:
+
+#### Laravel Pint (Code Formatting)
+
+Format code according to Laravel standards:
+
+```bash
+composer format
+```
+
+#### Rector (Automated Refactoring)
+
+Preview potential code improvements:
+
+```bash
+composer rector-dry
+```
+
+Apply automated refactorings:
+
+```bash
+composer rector
+```
+
+#### PHPStan (Static Analysis)
+
+Run static analysis:
+
+```bash
+composer analyse
+```
+
+#### Run All Quality Checks
+
+```bash
+composer lint
+```
+
+This runs both Pint and PHPStan.
+
+### Testing
 
 ```bash
 composer test

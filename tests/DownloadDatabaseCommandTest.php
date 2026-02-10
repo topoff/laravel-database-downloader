@@ -1,25 +1,23 @@
 <?php
 
+use Illuminate\Support\Facades\App;
 use Illuminate\Support\Facades\Event;
 use Topoff\DatabaseDownloader\Events\DatabaseImported;
-use Illuminate\Support\Facades\App;
 
-it('can run the db:download command help', function () {
+it('can run the db:download command help', function (): void {
     $this->artisan('db:download --help')
         ->assertExitCode(0);
 });
 
-it('dispatches DatabaseImported event', function () {
+it('dispatches DatabaseImported event', function (): void {
     Event::fake();
 
     DatabaseImported::dispatch('test-tenant', true);
 
-    Event::assertDispatched(DatabaseImported::class, function ($event) {
-        return $event->tenant === 'test-tenant' && $event->filesImported === true;
-    });
+    Event::assertDispatched(DatabaseImported::class, fn ($event) => $event->tenant === 'test-tenant' && $event->filesImported === true);
 });
 
-it('prevents execution in production environment', function () {
+it('prevents execution in production environment', function (): void {
     // We mock App::environment() to return 'production'
     App::shouldReceive('environment')->with('production')->andReturn(true);
     App::shouldReceive('environment')->andReturn('production');
@@ -29,7 +27,7 @@ it('prevents execution in production environment', function () {
         ->assertExitCode(0);
 });
 
-it('has the correct signature and options', function () {
+it('has the correct signature and options', function (): void {
     $command = app()->make(\Topoff\DatabaseDownloader\Commands\DownloadDatabaseCommand::class);
     $signature = $command->getNativeDefinition();
 

@@ -8,12 +8,13 @@ use Topoff\DatabaseDownloader\DatabaseDownloaderServiceProvider;
 
 class TestCase extends Orchestra
 {
+    #[\Override]
     protected function setUp(): void
     {
         parent::setUp();
 
         Factory::guessFactoryNamesUsing(
-            fn (string $modelName) => 'Topoff\\DatabaseDownloader\\Database\\Factories\\'.class_basename($modelName).'Factory'
+            fn (string $modelName): string => 'Topoff\\DatabaseDownloader\\Database\\Factories\\'.class_basename($modelName).'Factory'
         );
     }
 
@@ -24,7 +25,7 @@ class TestCase extends Orchestra
         ];
     }
 
-    public function getEnvironmentSetUp($app)
+    public function getEnvironmentSetUp($app): void
     {
         config()->set('database.default', 'testing');
 
