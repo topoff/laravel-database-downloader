@@ -14,7 +14,7 @@ it('dispatches DatabaseImported event', function (): void {
 
     DatabaseImported::dispatch(true);
 
-    Event::assertDispatched(DatabaseImported::class, fn ($event) => $event->filesImported === true);
+    Event::assertDispatched(DatabaseImported::class, fn ($event): bool => $event->filesImported === true);
 });
 
 it('prevents execution in production environment', function (): void {

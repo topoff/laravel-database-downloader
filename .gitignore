@@ -19,10 +19,18 @@ _ide_helper.php
 _ide_helper_models.php
 .phpstorm.meta.php
 
-# Editors
+# Editors & IDEs
 /.idea
 /.fleet
 /.vscode
+
+# AI Assistants (personal configs, not package guidelines)
+/.cursor
+/.gemini
+/.claude
+/.ai
+/.junie
+/.windsurf
 
 # Misc
 phpunit.xml
