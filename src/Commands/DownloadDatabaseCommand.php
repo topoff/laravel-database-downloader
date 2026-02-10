@@ -21,21 +21,21 @@ class DownloadDatabaseCommand extends Command
 
     protected $description = 'Import the live database from the live or backup server to local';
 
-    private string $localPath;
+    protected string $localPath;
 
-    private string $dbName;
+    protected string $dbName;
 
-    private string $dbCharset;
+    protected string $dbCharset;
 
-    private string $dbCollation;
+    protected string $dbCollation;
 
-    private string $mysqlBasicCommand;
+    protected string $mysqlBasicCommand;
 
-    private string $backupPath;
+    protected string $backupPath;
 
-    private ?string $mysqlConfigPath = null;
+    protected ?string $mysqlConfigPath = null;
 
-    private string $source;
+    protected string $source;
 
     public function handle(): int
     {
@@ -83,7 +83,7 @@ class DownloadDatabaseCommand extends Command
         }
     }
 
-    private function determineSource(): string
+    protected function determineSource(): string
     {
         $environment = $this->components->choice(
             'Select the data source',
@@ -106,7 +106,7 @@ class DownloadDatabaseCommand extends Command
         return "{$environment}-dump{$structureSuffix}";
     }
 
-    private function logStart(): void
+    protected function logStart(): void
     {
         $this->components->info('Chosen Command Options:');
         $this->components->twoColumnDetail('Source', $this->source);
@@ -115,27 +115,31 @@ class DownloadDatabaseCommand extends Command
         $this->newLine();
     }
 
-    private function canRunInCurrentEnvironment(): bool
+    protected function canRunInCurrentEnvironment(): bool
     {
         return ! App::environment('production');
     }
 
-    private function prepare(): void
+    protected function prepare(): void
     {
         $this->initializeConfig();
         $this->callSilently('cache:clear');
     }
 
-    private function ensureLocalDirectoryExists(): void
+    protected function ensureLocalDirectoryExists(): void
     {
         if (File::exists($this->localPath)) {
+            if (! $this->components->confirm('The local download directory already exists. Delete it and download fresh?', true)) {
+                throw new RuntimeException('Download cancelled by user. Local directory not cleared.');
+            }
+
             File::deleteDirectory($this->localPath);
         }
 
         File::makeDirectory($this->localPath, 0755, true, true);
     }
 
-    private function initializeConfig(): void
+    protected function initializeConfig(): void
     {
         $dbConnection = config('database-downloader.mysql_connection', 'mysql');
 
@@ -150,7 +154,7 @@ class DownloadDatabaseCommand extends Command
         $this->createMysqlConfigFile($dbConnection);
     }
 
-    private function validateLocalPath(string $path): string
+    protected function validateLocalPath(string $path): string
     {
         if ($path === '' || $path === '0') {
             throw new RuntimeException('Local path cannot be empty');
@@ -167,7 +171,7 @@ class DownloadDatabaseCommand extends Command
         return $path;
     }
 
-    private function validateDbName(string $dbName): string
+    protected function validateDbName(string $dbName): string
     {
         if ($dbName === '' || $dbName === '0') {
             throw new RuntimeException('Database name cannot be empty');
@@ -181,7 +185,7 @@ class DownloadDatabaseCommand extends Command
         return $dbName;
     }
 
-    private function buildBackupPath(): string
+    protected function buildBackupPath(): string
     {
         return str_replace(
             '{backup_name}',
@@ -190,7 +194,7 @@ class DownloadDatabaseCommand extends Command
         );
     }
 
-    private function createMysqlConfigFile(string $dbConnection): void
+    protected function createMysqlConfigFile(string $dbConnection): void
     {
         $credentials = $this->getDatabaseCredentials($dbConnection);
         $this->validateCredentials($credentials);
@@ -208,7 +212,7 @@ class DownloadDatabaseCommand extends Command
         $this->mysqlBasicCommand = 'mysql --defaults-extra-file='.escapeshellarg($this->mysqlConfigPath);
     }
 
-    private function getDatabaseCredentials(string $dbConnection): array
+    protected function getDatabaseCredentials(string $dbConnection): array
     {
         return [
             'username' => config("database.connections.{$dbConnection}.username"),
@@ -218,14 +222,14 @@ class DownloadDatabaseCommand extends Command
         ];
     }
 
-    private function validateCredentials(array $credentials): void
+    protected function validateCredentials(array $credentials): void
     {
         if (empty($credentials['username']) || empty($credentials['host'])) {
             throw new RuntimeException('Database credentials are not configured properly');
         }
     }
 
-    private function buildMysqlConfigContent(array $credentials): string
+    protected function buildMysqlConfigContent(array $credentials): string
     {
         return implode("\n", [
             '[client]',
@@ -237,7 +241,7 @@ class DownloadDatabaseCommand extends Command
         ]);
     }
 
-    private function removeMysqlConfigFile(): void
+    protected function removeMysqlConfigFile(): void
     {
         if ($this->mysqlConfigPath && File::exists($this->mysqlConfigPath)) {
             // Securely delete the file
@@ -246,7 +250,7 @@ class DownloadDatabaseCommand extends Command
         }
     }
 
-    private function getFileToImport(): ?string
+    protected function getFileToImport(): ?string
     {
         if ($localFilePath = $this->option('import-from-local-file-path')) {
             return $this->processLocalFile($localFilePath);
@@ -267,7 +271,7 @@ class DownloadDatabaseCommand extends Command
      *
      * @return string|null Returns file path to use, or null to download fresh
      */
-    private function handleExistingFiles(): ?string
+    protected function handleExistingFiles(): ?string
     {
         $existingFiles = $this->getExistingFiles();
 
@@ -311,7 +315,7 @@ class DownloadDatabaseCommand extends Command
      *
      * @return array<string>
      */
-    private function getExistingFiles(): array
+    protected function getExistingFiles(): array
     {
         $sqlFiles = [];
         $gzFiles = [];
@@ -349,7 +353,7 @@ class DownloadDatabaseCommand extends Command
         return array_unique(array_merge($sqlFiles, $gzFiles, $zipFiles));
     }
 
-    private function processLocalFile(string $filePath): string
+    protected function processLocalFile(string $filePath): string
     {
         $this->validateFilePath($filePath);
 
@@ -369,7 +373,7 @@ class DownloadDatabaseCommand extends Command
         return $filePath;
     }
 
-    private function validateFilePath(string $filePath): void
+    protected function validateFilePath(string $filePath): void
     {
         if (! File::exists($filePath)) {
             throw new RuntimeException("File does not exist: {$filePath}");
@@ -389,7 +393,7 @@ class DownloadDatabaseCommand extends Command
         }
     }
 
-    private function downloadSqlData(string $source): ?string
+    protected function downloadSqlData(string $source): ?string
     {
         if (Str::contains($source, 'dump')) {
             return $this->dumpFromRemote($source);
@@ -398,7 +402,7 @@ class DownloadDatabaseCommand extends Command
         return $this->downloadFromBackup();
     }
 
-    private function dumpFromRemote(string $source): string
+    protected function dumpFromRemote(string $source): string
     {
         $this->components->warn('⚠️  Remote dump will temporarily block the database');
 
@@ -423,7 +427,7 @@ class DownloadDatabaseCommand extends Command
         return $localFile;
     }
 
-    private function getRemoteServerConfig(bool $isStaging): array
+    protected function getRemoteServerConfig(bool $isStaging): array
     {
         $prefix = $isStaging ? 'staging_' : '';
 
@@ -434,7 +438,7 @@ class DownloadDatabaseCommand extends Command
         ];
     }
 
-    private function buildRemoteDumpCommand(array $config, string $optionNoData, string $localFile): string
+    protected function buildRemoteDumpCommand(array $config, string $optionNoData, string $localFile): string
     {
         $remoteConfig = escapeshellarg((string) $config['mysql_config_path']);
         $escapedDbName = escapeshellarg($this->dbName);
@@ -445,14 +449,14 @@ class DownloadDatabaseCommand extends Command
         return "ssh {$escapedUser}@{$escapedHost} \"mysqldump --defaults-extra-file={$remoteConfig} --databases {$escapedDbName}{$optionNoData}\" > {$escapedLocalFile}";
     }
 
-    private function validateRemoteConfig(?string $host, ?string $sshUser): void
+    protected function validateRemoteConfig(?string $host, ?string $sshUser): void
     {
         if (in_array($host, [null, '', '0'], true) || in_array($sshUser, [null, '', '0'], true)) {
             throw new RuntimeException('Remote server configuration is missing or invalid');
         }
     }
 
-    private function downloadFromBackup(): ?string
+    protected function downloadFromBackup(): ?string
     {
         $sshUser = config('database-downloader.backup_ssh_user');
         $host = config('database-downloader.backup_ssh_server');
@@ -508,7 +512,7 @@ class DownloadDatabaseCommand extends Command
         return "{$this->localPath}db-dumps/mysql-{$this->dbName}.sql";
     }
 
-    private function importDatabase(string $fileWithPath): void
+    protected function importDatabase(string $fileWithPath): void
     {
         $this->components->info('Importing database');
 
@@ -527,14 +531,14 @@ class DownloadDatabaseCommand extends Command
         $this->importSqlFile($fileWithPath);
     }
 
-    private function dropDatabase(): void
+    protected function dropDatabase(): void
     {
         $safeDbName = $this->escapeMysqlIdentifier($this->dbName);
         $command = "{$this->mysqlBasicCommand} --execute=\"DROP DATABASE IF EXISTS {$safeDbName}\"";
         $this->executeShellCommand($command);
     }
 
-    private function createDatabase(): void
+    protected function createDatabase(): void
     {
         $safeDbName = $this->escapeMysqlIdentifier($this->dbName);
         $safeCharset = $this->escapeMysqlIdentifier($this->dbCharset);
@@ -548,7 +552,7 @@ class DownloadDatabaseCommand extends Command
      * Escape a MySQL identifier (database name, charset, collation) for use in SQL via shell.
      * Only allows alphanumeric characters, underscores, and hyphens.
      */
-    private function escapeMysqlIdentifier(string $identifier): string
+    protected function escapeMysqlIdentifier(string $identifier): string
     {
         if (! preg_match('/^[a-zA-Z0-9_-]+$/', $identifier)) {
             throw new RuntimeException("Invalid MySQL identifier: {$identifier}");
@@ -557,7 +561,7 @@ class DownloadDatabaseCommand extends Command
         return $identifier;
     }
 
-    private function importSqlFile(string $fileWithPath): void
+    protected function importSqlFile(string $fileWithPath): void
     {
         $escapedDbName = escapeshellarg($this->dbName);
         $escapedFile = escapeshellarg($fileWithPath);
@@ -576,14 +580,14 @@ class DownloadDatabaseCommand extends Command
         }
     }
 
-    private function isPvAvailable(): bool
+    protected function isPvAvailable(): bool
     {
         exec('which pv 2>/dev/null', $output, $resultCode);
 
         return $resultCode === 0;
     }
 
-    private function importSqlFileWithProgress(string $escapedFile, string $escapedDbName): void
+    protected function importSqlFileWithProgress(string $escapedFile, string $escapedDbName): void
     {
         $this->components->twoColumnDetail('Importing SQL file', '<fg=yellow>IN PROGRESS</>');
 
@@ -601,12 +605,12 @@ class DownloadDatabaseCommand extends Command
         }
     }
 
-    private function dispatchEvents(): void
+    protected function dispatchEvents(): void
     {
         DatabaseImported::dispatch((bool) $this->option('files'));
     }
 
-    private function cleanup(): void
+    protected function cleanup(): void
     {
         $this->components->info('Cleaning up');
 
@@ -617,11 +621,15 @@ class DownloadDatabaseCommand extends Command
         }
 
         if (File::exists($this->localPath)) {
-            $this->components->task('Removing temporary files', fn () => File::deleteDirectory($this->localPath));
+            if ($this->components->confirm('Delete downloaded temporary files?', true)) {
+                $this->components->task('Removing temporary files', fn () => File::deleteDirectory($this->localPath));
+            } else {
+                $this->components->info('Temporary files kept in: '.$this->localPath);
+            }
         }
     }
 
-    private function executeShellCommand(string $command): ?string
+    protected function executeShellCommand(string $command): ?string
     {
         if ($this->getOutput()->isVerbose()) {
             $this->components->twoColumnDetail('Command', $command);
@@ -642,7 +650,7 @@ class DownloadDatabaseCommand extends Command
         return $output[0] ?? null;
     }
 
-    private function logCommandFailure(int $exitCode, array $output): never
+    protected function logCommandFailure(int $exitCode, array $output): never
     {
         $errorMessage = "Command failed with exit code {$exitCode}";
 
@@ -653,13 +661,13 @@ class DownloadDatabaseCommand extends Command
         throw new RuntimeException($errorMessage);
     }
 
-    private function logAndOutputError(string $error): void
+    protected function logAndOutputError(string $error): void
     {
         $this->error($error);
         Log::error($error);
     }
 
-    private function logAndOutputInfo(string $info): void
+    protected function logAndOutputInfo(string $info): void
     {
         $this->info($info);
         Log::info($info);

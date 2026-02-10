@@ -45,7 +45,7 @@ You'll be prompted to:
 After a successful import, the package dispatches a `Topoff\DatabaseDownloader\Events\DatabaseImported` event. You can listen to this event to perform post-import tasks like data sanitization or environment-specific adjustments.
 
 ```php
-// In your EventServiceProvider or AppServiceProvider
+// Optionally Register the Listener in your EventServiceProvider or AppServiceProvider, Laravel does this automatically
 Event::listen(
     \Topoff\DatabaseDownloader\Events\DatabaseImported::class,
     \App\Listeners\YourPostImportListener::class,
