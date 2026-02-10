@@ -6,7 +6,6 @@ use Illuminate\Console\Command;
 use Illuminate\Support\Facades\App;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Str;
 use RuntimeException;
 use Throwable;
@@ -97,12 +96,11 @@ class DownloadDatabaseCommand extends Command
 
     private function logStart(): void
     {
-        $this->logAndOutputDebug(sprintf(
-            'Starting database download - Source: %s, Drop existing: %s, Files: %s',
-            $this->option('source'),
-            $this->option('dropExisting') ? 'yes' : 'no',
-            $this->option('files') ? 'yes' : 'no'
-        ));
+        $this->components->info('Chosen Command Options:');
+        $this->components->twoColumnDetail('Source', $this->option('source'));
+        $this->components->twoColumnDetail('Drop Existing', $this->option('dropExisting') ? 'Yes' : 'No');
+        $this->components->twoColumnDetail('Import Files', $this->option('files') ? 'Yes' : 'No');
+        $this->newLine();
     }
 
     private function canRunInCurrentEnvironment(): bool
@@ -118,8 +116,8 @@ class DownloadDatabaseCommand extends Command
     private function prepare(): void
     {
         $this->initializeConfig();
-        $this->call('cache:clear');
-        $this->ensureLocalDirectoryExists();
+        $this->components->task('Clearing cache', fn () => $this->call('cache:clear'));
+        $this->components->task('Preparing local directory', fn () => $this->ensureLocalDirectoryExists());
     }
 
     private function ensureLocalDirectoryExists(): void
@@ -198,30 +196,49 @@ class DownloadDatabaseCommand extends Command
 
     private function createMysqlConfigFile(string $dbConnection): void
     {
-        $username = config("database.connections.{$dbConnection}.username");
-        $password = config("database.connections.{$dbConnection}.password");
-        $host = config("database.connections.{$dbConnection}.host");
-        $port = config("database.connections.{$dbConnection}.port");
-
-        if (empty($username) || empty($host)) {
-            throw new RuntimeException('Database credentials are not configured properly');
-        }
+        $credentials = $this->getDatabaseCredentials($dbConnection);
+        $this->validateCredentials($credentials);
 
         // Use random filename for security
         $this->mysqlConfigPath = database_path('mysql-login-'.Str::random(16).'.cnf');
 
-        // Build config with proper escaping
-        $content = "[client]\n";
-        $content .= 'user = '.escapeshellarg($username)."\n";
-        $content .= 'password = '.escapeshellarg($password ?? '')."\n";
-        $content .= 'host = '.escapeshellarg($host)."\n";
-        $content .= 'port = '.escapeshellarg((string) $port)."\n";
+        // Build config content
+        $content = $this->buildMysqlConfigContent($credentials);
 
         // Create file with restricted permissions
         File::put($this->mysqlConfigPath, $content);
         chmod($this->mysqlConfigPath, 0600); // Only owner can read/write
 
         $this->mysqlBasicCommand = 'mysql --defaults-extra-file='.escapeshellarg($this->mysqlConfigPath);
+    }
+
+    private function getDatabaseCredentials(string $dbConnection): array
+    {
+        return [
+            'username' => config("database.connections.{$dbConnection}.username"),
+            'password' => config("database.connections.{$dbConnection}.password"),
+            'host' => config("database.connections.{$dbConnection}.host"),
+            'port' => config("database.connections.{$dbConnection}.port"),
+        ];
+    }
+
+    private function validateCredentials(array $credentials): void
+    {
+        if (empty($credentials['username']) || empty($credentials['host'])) {
+            throw new RuntimeException('Database credentials are not configured properly');
+        }
+    }
+
+    private function buildMysqlConfigContent(array $credentials): string
+    {
+        return implode("\n", [
+            '[client]',
+            'user = '.escapeshellarg($credentials['username']),
+            'password = '.escapeshellarg($credentials['password'] ?? ''),
+            'host = '.escapeshellarg($credentials['host']),
+            'port = '.escapeshellarg((string) $credentials['port']),
+            '',
+        ]);
     }
 
     private function removeMysqlConfigFile(): void
@@ -276,15 +293,8 @@ class DownloadDatabaseCommand extends Command
 
         // Only allow specific extensions
         $allowedExtensions = ['.sql', '.sql.gz', '.zip'];
-        $hasAllowedExtension = false;
-        foreach ($allowedExtensions as $ext) {
-            if (Str::endsWith($realPath, $ext)) {
-                $hasAllowedExtension = true;
-                break;
-            }
-        }
 
-        if (! $hasAllowedExtension) {
+        if (! Str::endsWith($realPath, $allowedExtensions)) {
             throw new RuntimeException('Invalid file type. Only .sql, .sql.gz, and .zip files are allowed.');
         }
     }
@@ -300,26 +310,44 @@ class DownloadDatabaseCommand extends Command
 
     private function dumpFromRemote(string $source): string
     {
-        $info = 'Dumping database from remote server (this will block the database temporarily)';
-        $optionNoData = Str::contains($source, 'structure') ? ' --no-data' : '';
+        $this->components->warn('⚠️  Remote dump will temporarily block the database');
 
         $isStaging = Str::startsWith($source, 'staging');
-        $host = $isStaging ? config('database-downloader.staging_server') : config('database-downloader.server');
-        $sshUser = $isStaging ? config('database-downloader.staging_ssh_user') : config('database-downloader.ssh_user');
+        $config = $this->getRemoteServerConfig($isStaging);
+        $this->validateRemoteConfig($config['host'], $config['ssh_user']);
 
-        $this->validateRemoteConfig($host, $sshUser);
+        $optionNoData = Str::contains($source, 'structure') ? ' --no-data' : '';
+        $localFile = $this->localPath.'/'.$this->dbName.'.sql';
 
-        $localFile = $this->localPath.'/'.escapeshellarg($this->dbName).'.sql';
-        $remoteConfig = escapeshellarg("/etc/{$this->tenant}/mysql-login-config.cnf");
-        $escapedDbName = escapeshellarg($this->dbName);
-        $escapedHost = escapeshellarg($host);
-        $escapedUser = escapeshellarg($sshUser);
+        $command = $this->buildRemoteDumpCommand($config, $optionNoData, $localFile);
 
-        $command = "ssh {$escapedUser}@{$escapedHost} \"mysqldump --defaults-extra-file={$remoteConfig} --databases {$escapedDbName}{$optionNoData}\" > {$localFile}";
-
-        $this->executeShellCommand($command, $info);
+        $this->components->task(
+            "Dumping from {$config['host']}",
+            fn () => $this->executeShellCommand($command)
+        );
 
         return $localFile;
+    }
+
+    private function getRemoteServerConfig(bool $isStaging): array
+    {
+        $prefix = $isStaging ? 'staging_' : '';
+
+        return [
+            'host' => config("database-downloader.{$prefix}server"),
+            'ssh_user' => config("database-downloader.{$prefix}ssh_user"),
+        ];
+    }
+
+    private function buildRemoteDumpCommand(array $config, string $optionNoData, string $localFile): string
+    {
+        $remoteConfig = escapeshellarg("/etc/{$this->tenant}/mysql-login-config.cnf");
+        $escapedDbName = escapeshellarg($this->dbName);
+        $escapedHost = escapeshellarg($config['host']);
+        $escapedUser = escapeshellarg($config['ssh_user']);
+        $escapedLocalFile = escapeshellarg($localFile);
+
+        return "ssh {$escapedUser}@{$escapedHost} \"mysqldump --defaults-extra-file={$remoteConfig} --databases {$escapedDbName}{$optionNoData}\" > {$escapedLocalFile}";
     }
 
     private function validateRemoteConfig(?string $host, ?string $sshUser): void
@@ -341,10 +369,10 @@ class DownloadDatabaseCommand extends Command
         $escapedBackupPath = escapeshellarg($this->backupPath);
 
         $latestFileCommand = "ssh {$escapedUser}@{$escapedHost} \"ls -t {$escapedBackupPath} | head -1\"";
-        $fileName = $this->executeShellCommand($latestFileCommand, 'Fetching latest backup filename');
+        $fileName = $this->executeShellCommand($latestFileCommand);
 
         if (empty($fileName)) {
-            $this->logAndOutputDebug('No backup file found');
+            $this->components->warn('No backup file found');
 
             return null;
         }
@@ -354,55 +382,87 @@ class DownloadDatabaseCommand extends Command
             throw new RuntimeException('Invalid characters in backup filename');
         }
 
-        $this->logAndOutputDebug("Downloading backup file: {$fileName}");
+        // Prepare escaped paths
         $escapedRemotePath = escapeshellarg("{$this->backupPath}{$fileName}");
         $escapedLocalPath = escapeshellarg($this->localPath);
+
+        // Download backup file
         $rsyncCommand = "rsync -vzrlptD {$escapedUser}@{$escapedHost}:{$escapedRemotePath} {$escapedLocalPath}";
 
-        $output = [];
-        $resultCode = -1;
-        exec($rsyncCommand, $output, $resultCode);
+        $this->components->task("Downloading File with Command: {$rsyncCommand}", function () use ($rsyncCommand, $escapedUser, $escapedHost, $escapedRemotePath, $escapedLocalPath) {
+            $output = [];
+            $resultCode = -1;
+            exec($rsyncCommand, $output, $resultCode);
 
-        $this->logAndOutputInfo('Download completed with code: '.$resultCode);
+            if ($resultCode > 0) {
+                throw new RuntimeException('Failed to download backup file');
+            }
+        });
 
-        if ($resultCode > 0) {
-            throw new RuntimeException('Failed to download backup file');
-        }
-
+        // Extract and decompress
         $escapedZipFile = escapeshellarg("{$this->localPath}{$fileName}");
-        $this->executeShellCommand("unzip -o {$escapedZipFile} -d {$escapedLocalPath}", 'Extracting backup archive');
+        $this->components->task('Extracting backup archive',
+            fn () => $this->executeShellCommand("unzip -o {$escapedZipFile} -d {$escapedLocalPath}")
+        );
 
         $gzFile = escapeshellarg("{$this->localPath}db-dumps/mysql-{$this->dbName}.sql.gz");
-        $this->executeShellCommand("gunzip -f {$gzFile}", 'Decompressing SQL file');
+        $this->components->task('Decompressing SQL file',
+            fn () => $this->executeShellCommand("gunzip -f {$gzFile}")
+        );
 
         return "{$this->localPath}db-dumps/mysql-{$this->dbName}.sql";
     }
 
     private function importDatabase(string $fileWithPath): void
     {
+        $this->components->info('Importing database');
+
         if ($this->option('dropExisting')) {
-            $this->dropDatabase();
+            $this->components->task(
+                'Dropping existing database',
+                fn () => $this->dropDatabase()
+            );
         }
 
-        $this->createDatabase();
-        $this->importSqlFile($fileWithPath);
+        $this->components->task(
+            'Creating database',
+            fn () => $this->createDatabase()
+        );
+
+        $this->components->task(
+            'Importing SQL file',
+            fn () => $this->importSqlFile($fileWithPath)
+        );
     }
 
     private function dropDatabase(): void
     {
-        $escapedDbName = escapeshellarg($this->dbName);
-        $command = "{$this->mysqlBasicCommand} --execute=\"DROP DATABASE IF EXISTS {$escapedDbName}\"";
-        $this->executeShellCommand($command, "Dropping database: {$this->dbName}");
+        $safeDbName = $this->escapeMysqlIdentifier($this->dbName);
+        $command = "{$this->mysqlBasicCommand} --execute=\"DROP DATABASE IF EXISTS {$safeDbName}\"";
+        $this->executeShellCommand($command);
     }
 
     private function createDatabase(): void
     {
-        $escapedDbName = escapeshellarg($this->dbName);
-        $escapedCharset = escapeshellarg($this->dbCharset);
-        $escapedCollation = escapeshellarg($this->dbCollation);
+        $safeDbName = $this->escapeMysqlIdentifier($this->dbName);
+        $safeCharset = $this->escapeMysqlIdentifier($this->dbCharset);
+        $safeCollation = $this->escapeMysqlIdentifier($this->dbCollation);
 
-        $command = "{$this->mysqlBasicCommand} --execute=\"CREATE DATABASE IF NOT EXISTS {$escapedDbName} DEFAULT CHARACTER SET {$escapedCharset} COLLATE {$escapedCollation}\"";
-        $this->executeShellCommand($command, "Creating database: {$this->dbName}");
+        $command = "{$this->mysqlBasicCommand} --execute=\"CREATE DATABASE IF NOT EXISTS {$safeDbName} DEFAULT CHARACTER SET {$safeCharset} COLLATE {$safeCollation}\"";
+        $this->executeShellCommand($command);
+    }
+
+    /**
+     * Escape a MySQL identifier (database name, charset, collation) for use in SQL.
+     * Only allows alphanumeric characters, underscores, and hyphens.
+     */
+    private function escapeMysqlIdentifier(string $identifier): string
+    {
+        if (! preg_match('/^[a-zA-Z0-9_-]+$/', $identifier)) {
+            throw new RuntimeException("Invalid MySQL identifier: {$identifier}");
+        }
+
+        return "`{$identifier}`";
     }
 
     private function importSqlFile(string $fileWithPath): void
@@ -411,7 +471,7 @@ class DownloadDatabaseCommand extends Command
         $escapedFile = escapeshellarg($fileWithPath);
 
         $command = "{$this->mysqlBasicCommand} {$escapedDbName} < {$escapedFile}";
-        $this->executeShellCommand($command, "Importing SQL file: {$fileWithPath}");
+        $this->executeShellCommand($command);
     }
 
     private function dispatchEvents(): void
@@ -421,25 +481,23 @@ class DownloadDatabaseCommand extends Command
 
     private function cleanup(): void
     {
-        $this->call('queue:prune-failed');
+        $this->components->info('Cleaning up');
+
+        $this->components->task('Pruning failed queue jobs', fn () => $this->call('queue:prune-failed'));
 
         if (class_exists('\Laravel\Telescope\TelescopeServiceProvider')) {
-            $this->call('telescope:clear');
+            $this->components->task('Clearing Telescope data', fn () => $this->call('telescope:clear'));
         }
 
         if (File::exists($this->localPath)) {
-            File::deleteDirectory($this->localPath);
+            $this->components->task('Removing temporary files', fn () => File::deleteDirectory($this->localPath));
         }
     }
 
-    private function executeShellCommand(string $command, ?string $info = null): ?string
+    private function executeShellCommand(string $command): ?string
     {
-        if ($info) {
-            $this->logAndOutputDebug($info);
-        }
-
         if ($this->getOutput()->isVerbose()) {
-            $this->line("Executing: {$command}");
+            $this->components->twoColumnDetail('Command', $command);
         }
 
         $output = [];
@@ -447,18 +505,25 @@ class DownloadDatabaseCommand extends Command
         exec($command, $output, $resultCode);
 
         if ($resultCode !== 0) {
-            $errorMessage = 'Command failed with exit code '.$resultCode;
-            if (! empty($output)) {
-                $errorMessage .= ': '.implode(' ', $output);
-            }
-            throw new RuntimeException($errorMessage);
+            $this->logCommandFailure($resultCode, $output);
         }
 
         if ($this->getOutput()->isVerbose() && ! empty($output)) {
-            $this->logAndOutputInfo('Output: '.implode(' ', $output));
+            $this->components->bulletList($output);
         }
 
         return $output[0] ?? null;
+    }
+
+    private function logCommandFailure(int $exitCode, array $output): never
+    {
+        $errorMessage = "Command failed with exit code {$exitCode}";
+
+        if (! empty($output)) {
+            $errorMessage .= ":\n".implode("\n", $output);
+        }
+
+        throw new RuntimeException($errorMessage);
     }
 
     private function logAndOutputError(string $error): void
