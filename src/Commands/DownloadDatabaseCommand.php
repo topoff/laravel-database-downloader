@@ -612,7 +612,9 @@ class DownloadDatabaseCommand extends Command
 
         $command = "awk -v tbl={$escapedTable} '"
             .'/^-- Table structure for table/ && found { exit } '
+            .'/^DROP TABLE IF EXISTS/ && found { exit } '
             .'index($0, "-- Table structure for table `" tbl "`") { found=1 } '
+            .'index($0, "DROP TABLE IF EXISTS `" tbl "`") { found=1 } '
             ."found { print }' {$escapedInput} > {$escapedOutput}";
 
         $this->components->task(
