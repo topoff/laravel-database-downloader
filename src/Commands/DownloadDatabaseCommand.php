@@ -221,11 +221,13 @@ class DownloadDatabaseCommand extends Command
 
     protected function buildBackupPath(): string
     {
-        return str_replace(
+        $path = str_replace(
             '{backup_name}',
             config('backup.backup.name', 'default'),
             config('database-downloader.backup_path_template')
         );
+
+        return Str::finish($path, '/');
     }
 
     protected function createMysqlConfigFile(string $dbConnection): void
