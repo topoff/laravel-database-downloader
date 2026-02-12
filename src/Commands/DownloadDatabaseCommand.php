@@ -608,12 +608,12 @@ class DownloadDatabaseCommand extends Command
         $escapedInput = escapeshellarg($fileWithPath);
         $escapedOutput = escapeshellarg($filteredFile);
 
-        // The table name is validated to only contain [a-zA-Z0-9_-], safe for sed patterns
-        $sedScript = "/-- Table structure for table .*\`{$this->table}\`/,/-- Table structure for table /{"
-            ."/-- Table structure for table .*\`{$this->table}\`/p;"
-            .'/-- Table structure for table /!p;}';
+        $escapedTable = escapeshellarg($this->table);
 
-        $command = 'sed -n '.escapeshellarg($sedScript)." {$escapedInput} > {$escapedOutput}";
+        $command = "awk -v tbl={$escapedTable} '"
+            .'/^-- Table structure for table/ && found { exit } '
+            .'index($0, "-- Table structure for table `" tbl "`") { found=1 } '
+            ."found { print }' {$escapedInput} > {$escapedOutput}";
 
         $this->components->task(
             "Filtering SQL file for table '{$this->table}'",
