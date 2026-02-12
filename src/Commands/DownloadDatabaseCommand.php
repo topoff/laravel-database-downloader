@@ -552,12 +552,53 @@ class DownloadDatabaseCommand extends Command
             fn (): ?string => $this->executeShellCommand("unzip -o {$escapedZipFile} -d {$escapedLocalPath}")
         );
 
-        $gzFile = escapeshellarg("{$this->localPath}db-dumps/mysql-{$this->dbName}.sql.gz");
+        $gzFile = $this->findGzFileInBackup();
+        $escapedGzFile = escapeshellarg($gzFile);
         $this->components->task('Decompressing SQL file',
-            fn (): ?string => $this->executeShellCommand("gunzip -f {$gzFile}")
+            fn (): ?string => $this->executeShellCommand("gunzip -f {$escapedGzFile}")
         );
 
-        return "{$this->localPath}db-dumps/mysql-{$this->dbName}.sql";
+        return Str::replaceLast('.gz', '', $gzFile);
+    }
+
+    protected function findGzFileInBackup(): string
+    {
+        $dbDumpsPath = "{$this->localPath}db-dumps/";
+        $gzFiles = File::glob("{$dbDumpsPath}*.sql.gz");
+
+        if ($gzFiles === []) {
+            throw new RuntimeException("No .sql.gz file found in {$dbDumpsPath}");
+        }
+
+        if (count($gzFiles) === 1) {
+            return $gzFiles[0];
+        }
+
+        // Multiple gz files: prefer one matching the local database name
+        foreach ($gzFiles as $file) {
+            if (Str::contains($file, "mysql-{$this->dbName}.sql.gz")) {
+                return $file;
+            }
+        }
+
+        $fileNames = array_map(fn (string $file): string => basename($file), $gzFiles);
+
+        // In non-interactive mode, use the first file
+        if ($this->option('no-interaction')) {
+            $this->components->warn("Multiple SQL files found, using: {$fileNames[0]}");
+
+            return $gzFiles[0];
+        }
+
+        $choice = $this->components->choice(
+            'Multiple SQL files found in backup. Which one should be imported?',
+            $fileNames,
+            0
+        );
+
+        $index = array_search($choice, $fileNames, true);
+
+        return $gzFiles[$index];
     }
 
     protected function filterSqlFileForTable(string $fileWithPath): string
