@@ -41,6 +41,7 @@
         }
     },
     "scripts": {
+        "do" : "vendor/bin/rector && vendor/bin/pint && vendor/bin/phpstan analyse",
         "post-autoload-dump": [
             "@clear",
             "@prepare",

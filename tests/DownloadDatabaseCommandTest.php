@@ -35,5 +35,23 @@ it('has the correct signature and options', function (): void {
         ->and($signature->hasOption('dropExisting'))->toBeTrue()
         ->and($signature->hasOption('files'))->toBeTrue()
         ->and($signature->hasOption('dbName'))->toBeTrue()
-        ->and($signature->hasOption('import-from-local-file-path'))->toBeTrue();
+        ->and($signature->hasOption('import-from-local-file-path'))->toBeTrue()
+        ->and($signature->hasOption('table'))->toBeTrue();
+});
+
+it('validates table name rejects invalid characters', function (): void {
+    $command = new \Topoff\DatabaseDownloader\Commands\DownloadDatabaseCommand;
+    $method = new ReflectionMethod($command, 'validateTableName');
+
+    expect(fn (): mixed => $method->invoke($command, 'users; DROP TABLE'))
+        ->toThrow(RuntimeException::class, 'Invalid table name');
+});
+
+it('validates table name accepts valid names', function (): void {
+    $command = new \Topoff\DatabaseDownloader\Commands\DownloadDatabaseCommand;
+    $method = new ReflectionMethod($command, 'validateTableName');
+
+    expect($method->invoke($command, 'users'))->toBe('users')
+        ->and($method->invoke($command, 'user_profiles'))->toBe('user_profiles')
+        ->and($method->invoke($command, 'my-table'))->toBe('my-table');
 });

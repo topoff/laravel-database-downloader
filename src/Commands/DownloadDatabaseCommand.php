@@ -17,8 +17,9 @@ class DownloadDatabaseCommand extends Command
     {--source=backup : Data source: backup|staging-dump|staging-dump-structure|live-dump|live-dump-structure}
     {--dbName= : Use a different database name}
     {--import-from-local-file-path= : Import from a specific local file instead of downloading}
-    {--dropExisting : Drop the database before import if it exists} 
-    {--files : Download and import files from public/storage}';
+    {--dropExisting : Drop the database before import if it exists}
+    {--files : Download and import files from public/storage}
+    {--table= : Import only a specific table}';
 
     protected $description = 'Import the live database from the live or backup server to local';
 
@@ -37,6 +38,8 @@ class DownloadDatabaseCommand extends Command
     protected ?string $mysqlConfigPath = null;
 
     protected string $source;
+
+    protected ?string $table = null;
 
     public function handle(): int
     {
@@ -61,6 +64,10 @@ class DownloadDatabaseCommand extends Command
                 $this->logAndOutputInfo('No file to import found');
 
                 return self::FAILURE;
+            }
+
+            if ($this->table !== null) {
+                $fileToImport = $this->filterSqlFileForTable($fileToImport);
             }
 
             $this->importDatabase($fileToImport);
@@ -118,6 +125,9 @@ class DownloadDatabaseCommand extends Command
         $this->components->twoColumnDetail('Source', $this->source);
         $this->components->twoColumnDetail('Drop Existing', $this->option('dropExisting') ? 'Yes' : 'No');
         $this->components->twoColumnDetail('Import Files', $this->option('files') ? 'Yes' : 'No');
+        if ($this->table !== null) {
+            $this->components->twoColumnDetail('Table', $this->table);
+        }
         $this->newLine();
     }
 
@@ -136,10 +146,8 @@ class DownloadDatabaseCommand extends Command
     {
         if (File::exists($this->localPath)) {
             // In non-interactive mode, always delete without asking
-            if (! $this->option('no-interaction')) {
-                if (! $this->components->confirm('The local download directory already exists. Delete it and download fresh?', true)) {
-                    throw new RuntimeException('Download cancelled by user. Local directory not cleared.');
-                }
+            if (! $this->option('no-interaction') && ! $this->components->confirm('The local download directory already exists. Delete it and download fresh?', true)) {
+                throw new RuntimeException('Download cancelled by user. Local directory not cleared.');
             }
 
             File::deleteDirectory($this->localPath);
@@ -158,6 +166,10 @@ class DownloadDatabaseCommand extends Command
         );
         $this->dbCharset = config("database.connections.{$dbConnection}.charset", 'utf8mb4');
         $this->dbCollation = config("database.connections.{$dbConnection}.collation", 'utf8mb4_unicode_ci');
+
+        if ($this->option('table')) {
+            $this->table = $this->validateTableName($this->option('table'));
+        }
 
         $this->backupPath = $this->buildBackupPath();
         $this->createMysqlConfigFile($dbConnection);
@@ -192,6 +204,19 @@ class DownloadDatabaseCommand extends Command
         }
 
         return $dbName;
+    }
+
+    protected function validateTableName(string $tableName): string
+    {
+        if ($tableName === '' || $tableName === '0') {
+            throw new RuntimeException('Table name cannot be empty');
+        }
+
+        if (preg_match('/[^a-zA-Z0-9_-]/', $tableName)) {
+            throw new RuntimeException('Invalid table name. Only alphanumeric, underscore, and hyphen allowed.');
+        }
+
+        return $tableName;
     }
 
     protected function buildBackupPath(): string
@@ -421,10 +446,8 @@ class DownloadDatabaseCommand extends Command
         $this->components->warn('⚠️  Remote dump will temporarily block the database');
 
         // In non-interactive mode, skip confirmation
-        if (! $this->option('no-interaction')) {
-            if (! $this->components->confirm('Do you want to continue?', false)) {
-                throw new RuntimeException('Remote dump cancelled by user');
-            }
+        if (! $this->option('no-interaction') && ! $this->components->confirm('Do you want to continue?', false)) {
+            throw new RuntimeException('Remote dump cancelled by user');
         }
 
         $isStaging = Str::startsWith($source, 'staging');
@@ -462,6 +485,12 @@ class DownloadDatabaseCommand extends Command
         $escapedHost = escapeshellarg((string) $config['host']);
         $escapedUser = escapeshellarg((string) $config['ssh_user']);
         $escapedLocalFile = escapeshellarg($localFile);
+
+        if ($this->table !== null) {
+            $escapedTable = escapeshellarg($this->table);
+
+            return "ssh {$escapedUser}@{$escapedHost} \"mysqldump --defaults-extra-file={$remoteConfig} {$escapedDbName} {$escapedTable}{$optionNoData}\" > {$escapedLocalFile}";
+        }
 
         return "ssh {$escapedUser}@{$escapedHost} \"mysqldump --defaults-extra-file={$remoteConfig} --databases {$escapedDbName}{$optionNoData}\" > {$escapedLocalFile}";
     }
@@ -529,21 +558,51 @@ class DownloadDatabaseCommand extends Command
         return "{$this->localPath}db-dumps/mysql-{$this->dbName}.sql";
     }
 
-    protected function importDatabase(string $fileWithPath): void
+    protected function filterSqlFileForTable(string $fileWithPath): string
     {
-        $this->components->info('Importing database');
+        $filteredFile = dirname($fileWithPath).'/'.$this->table.'.sql';
 
-        if ($this->option('dropExisting')) {
-            $this->components->task(
-                'Dropping existing database',
-                fn () => $this->dropDatabase()
-            );
-        }
+        $escapedInput = escapeshellarg($fileWithPath);
+        $escapedOutput = escapeshellarg($filteredFile);
+
+        // The table name is validated to only contain [a-zA-Z0-9_-], safe for sed patterns
+        $sedScript = "/-- Table structure for table .*\`{$this->table}\`/,/-- Table structure for table /{"
+            ."/-- Table structure for table .*\`{$this->table}\`/p;"
+            .'/-- Table structure for table /!p;}';
+
+        $command = 'sed -n '.escapeshellarg($sedScript)." {$escapedInput} > {$escapedOutput}";
 
         $this->components->task(
-            'Creating database',
-            fn () => $this->createDatabase()
+            "Filtering SQL file for table '{$this->table}'",
+            fn (): ?string => $this->executeShellCommand($command)
         );
+
+        if (! File::exists($filteredFile) || File::size($filteredFile) === 0) {
+            throw new RuntimeException("Table '{$this->table}' was not found in the SQL file");
+        }
+
+        return $filteredFile;
+    }
+
+    protected function importDatabase(string $fileWithPath): void
+    {
+        if ($this->table !== null) {
+            $this->components->info("Importing table '{$this->table}' into database '{$this->dbName}'");
+        } else {
+            $this->components->info('Importing database');
+
+            if ($this->option('dropExisting')) {
+                $this->components->task(
+                    'Dropping existing database',
+                    fn () => $this->dropDatabase()
+                );
+            }
+
+            $this->components->task(
+                'Creating database',
+                fn () => $this->createDatabase()
+            );
+        }
 
         $this->importSqlFile($fileWithPath);
     }
