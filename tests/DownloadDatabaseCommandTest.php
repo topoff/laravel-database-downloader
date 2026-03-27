@@ -2,6 +2,7 @@
 
 use Illuminate\Support\Facades\App;
 use Illuminate\Support\Facades\Event;
+use Topoff\DatabaseDownloader\Commands\DownloadDatabaseCommand;
 use Topoff\DatabaseDownloader\Events\DatabaseImported;
 
 it('can run the db:download command help', function (): void {
@@ -28,7 +29,7 @@ it('prevents execution in production environment', function (): void {
 });
 
 it('has the correct signature and options', function (): void {
-    $command = app()->make(\Topoff\DatabaseDownloader\Commands\DownloadDatabaseCommand::class);
+    $command = app()->make(DownloadDatabaseCommand::class);
     $signature = $command->getNativeDefinition();
 
     expect($signature->hasOption('source'))->toBeTrue()
@@ -40,7 +41,7 @@ it('has the correct signature and options', function (): void {
 });
 
 it('validates table name rejects invalid characters', function (): void {
-    $command = new \Topoff\DatabaseDownloader\Commands\DownloadDatabaseCommand;
+    $command = new DownloadDatabaseCommand;
     $method = new ReflectionMethod($command, 'validateTableName');
 
     expect(fn (): mixed => $method->invoke($command, 'users; DROP TABLE'))
@@ -48,7 +49,7 @@ it('validates table name rejects invalid characters', function (): void {
 });
 
 it('validates table name accepts valid names', function (): void {
-    $command = new \Topoff\DatabaseDownloader\Commands\DownloadDatabaseCommand;
+    $command = new DownloadDatabaseCommand;
     $method = new ReflectionMethod($command, 'validateTableName');
 
     expect($method->invoke($command, 'users'))->toBe('users')

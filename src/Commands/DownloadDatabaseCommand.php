@@ -581,7 +581,7 @@ class DownloadDatabaseCommand extends Command
             }
         }
 
-        $fileNames = array_map(fn (string $file): string => basename($file), $gzFiles);
+        $fileNames = array_map(basename(...), $gzFiles);
 
         // In non-interactive mode, use the first file
         if ($this->option('no-interaction')) {
@@ -608,7 +608,7 @@ class DownloadDatabaseCommand extends Command
         $escapedInput = escapeshellarg($fileWithPath);
         $escapedOutput = escapeshellarg($filteredFile);
 
-        $escapedTable = escapeshellarg($this->table);
+        $escapedTable = escapeshellarg((string) $this->table);
 
         $command = "awk -v tbl={$escapedTable} '"
             .'/^-- Table structure for table/ && found { exit } '
