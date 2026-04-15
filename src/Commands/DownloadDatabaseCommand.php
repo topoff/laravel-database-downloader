@@ -732,23 +732,25 @@ class DownloadDatabaseCommand extends Command
         DatabaseImported::dispatch((bool) $this->option('files'));
     }
 
-    protected function cleanup() : void
+    protected function cleanup(): void
     {
         $this->components->info('Cleaning up');
 
         try {
-            if (Schema::hasTable('failed_jobs')) {
-                $this->components->task('Pruning failed queue jobs', fn() => $this->call('queue:prune-failed'));
+            $failedDriver = config('queue.failed.driver');
+
+            if (in_array($failedDriver, ['database', 'database-uuids'], true) && Schema::hasTable('failed_jobs')) {
+                $this->components->task('Pruning failed queue jobs', fn () => $this->call('queue:prune-failed'));
             }
-        } catch (RuntimeException $e) {
-            $this->components->error($e->getMessage());
+        } catch (Throwable $t) {
+            $this->components->error($t->getMessage());
         }
 
         if (class_exists('\Laravel\Telescope\TelescopeServiceProvider')) {
             try {
-                $this->components->task('Clearing Telescope data', fn() => $this->call('telescope:clear'));
-            } catch (RuntimeException $e) {
-                $this->components->error($e->getMessage());
+                $this->components->task('Clearing Telescope data', fn () => $this->call('telescope:clear'));
+            } catch (Throwable $t) {
+                $this->components->error($t->getMessage());
             }
         }
 
@@ -756,9 +758,9 @@ class DownloadDatabaseCommand extends Command
             // In non-interactive mode, always delete
             if ($this->option('no-interaction') || $this->components->confirm('Delete downloaded temporary files?', true)) {
                 try {
-                    $this->components->task('Removing temporary files', fn() => File::deleteDirectory($this->localPath));
-                } catch (RuntimeException $e) {
-                    $this->components->error($e->getMessage());
+                    $this->components->task('Removing temporary files', fn () => File::deleteDirectory($this->localPath));
+                } catch (Throwable $t) {
+                    $this->components->error($t->getMessage());
                 }
             } else {
                 $this->components->info('Temporary files kept in: '.$this->localPath);
