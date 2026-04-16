@@ -687,15 +687,16 @@ class DownloadDatabaseCommand extends Command
     {
         $escapedDbName = escapeshellarg($this->dbName);
         $escapedFile = escapeshellarg($fileWithPath);
+        $definerFilter = $this->buildDefinerStripFilter();
 
         if ($this->isPvAvailable()) {
-            $this->importSqlFileWithProgress($escapedFile, $escapedDbName);
+            $this->importSqlFileWithProgress($escapedFile, $escapedDbName, $definerFilter);
         } else {
             $this->info('If you want to see the progress, install pv with: brew install pv');
             $this->components->task(
                 'Importing SQL file',
-                function () use ($escapedDbName, $escapedFile): void {
-                    $command = "{$this->mysqlBasicCommand} {$escapedDbName} < {$escapedFile}";
+                function () use ($escapedDbName, $escapedFile, $definerFilter): void {
+                    $command = "{$definerFilter} < {$escapedFile} | {$this->mysqlBasicCommand} {$escapedDbName}";
                     $this->executeShellCommand($command);
                 }
             );
@@ -709,11 +710,11 @@ class DownloadDatabaseCommand extends Command
         return $resultCode === 0;
     }
 
-    protected function importSqlFileWithProgress(string $escapedFile, string $escapedDbName): void
+    protected function importSqlFileWithProgress(string $escapedFile, string $escapedDbName, string $definerFilter): void
     {
         $this->components->twoColumnDetail('Importing SQL file', '<fg=yellow>IN PROGRESS</>');
 
-        $command = "pv -p -e -t -a {$escapedFile} | {$this->mysqlBasicCommand} {$escapedDbName}";
+        $command = "pv -p -e -t -a {$escapedFile} | {$definerFilter} | {$this->mysqlBasicCommand} {$escapedDbName}";
 
         if ($this->getOutput()->isVerbose()) {
             $this->components->twoColumnDetail('Command', $command);
@@ -725,6 +726,20 @@ class DownloadDatabaseCommand extends Command
         if ($resultCode !== 0) {
             throw new RuntimeException("SQL import failed with exit code {$resultCode}");
         }
+    }
+
+    /**
+     * Shell filter that strips DEFINER clauses from a SQL dump stream.
+     *
+     * Dumps taken on another server embed the creator user (e.g. `forge`@`%`)
+     * as the DEFINER of views, triggers, and routines. Importing those on a
+     * server where the MySQL user lacks the SUPER / SET_USER_ID privilege
+     * fails with error 1227. Removing DEFINER and downgrading SQL SECURITY
+     * to INVOKER makes the dump portable across environments.
+     */
+    protected function buildDefinerStripFilter(): string
+    {
+        return "sed -E 's/DEFINER=`[^`]+`@`[^`]+`//g; s/SQL SECURITY DEFINER/SQL SECURITY INVOKER/g'";
     }
 
     protected function dispatchEvents(): void
