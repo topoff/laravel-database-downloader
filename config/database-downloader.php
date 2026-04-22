@@ -14,7 +14,7 @@ return [
     /*
      * The path to the MySQL config file on the live server.
      */
-    'mysql_config_path' => env('DB_DOWNLOADER_MYSQL_CONFIG_PATH', '~/mysql-login.cnf'),
+    'live_mysql_config_path' => env('DB_DOWNLOADER_MYSQL_CONFIG_PATH', '~/mysql-login.cnf'),
 
     /*
      * The database.connections.key to use

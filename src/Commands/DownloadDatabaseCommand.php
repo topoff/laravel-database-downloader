@@ -472,9 +472,9 @@ class DownloadDatabaseCommand extends Command
 
     protected function getRemoteServerConfig(bool $isStaging): array
     {
-        $prefix = $isStaging ? 'staging_' : '';
+        $prefix = $isStaging ? 'staging_' : 'live_';
 
-        return [
+            return [
             'host' => config("database-downloader.{$prefix}server"),
             'ssh_user' => config("database-downloader.{$prefix}ssh_user"),
             'mysql_config_path' => config("database-downloader.{$prefix}mysql_config_path"),
