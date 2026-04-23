@@ -739,7 +739,7 @@ class DownloadDatabaseCommand extends Command
      */
     protected function buildDefinerStripFilter(): string
     {
-        return "sed -E 's/DEFINER=`[^`]+`@`[^`]+`//g; s/SQL SECURITY DEFINER/SQL SECURITY INVOKER/g'";
+        return "LC_ALL=C sed -E 's/DEFINER=`[^`]+`@`[^`]+`//g; s/SQL SECURITY DEFINER/SQL SECURITY INVOKER/g'";
     }
 
     protected function dispatchEvents(): void
