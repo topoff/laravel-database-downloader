@@ -492,10 +492,10 @@ class DownloadDatabaseCommand extends Command
         if ($this->table !== null) {
             $escapedTable = escapeshellarg($this->table);
 
-            return "ssh {$escapedUser}@{$escapedHost} \"mysqldump --defaults-extra-file={$remoteConfig} {$escapedDbName} {$escapedTable}{$optionNoData}\" > {$escapedLocalFile}";
+            return "ssh {$escapedUser}@{$escapedHost} \"mysqldump --defaults-extra-file={$remoteConfig} --column-statistics=0 {$escapedDbName} {$escapedTable}{$optionNoData}\" > {$escapedLocalFile}";
         }
 
-        return "ssh {$escapedUser}@{$escapedHost} \"mysqldump --defaults-extra-file={$remoteConfig} --databases {$escapedDbName}{$optionNoData}\" > {$escapedLocalFile}";
+        return "ssh {$escapedUser}@{$escapedHost} \"mysqldump --defaults-extra-file={$remoteConfig} --column-statistics=0 --databases {$escapedDbName}{$optionNoData}\" > {$escapedLocalFile}";
     }
 
     protected function validateRemoteConfig(?string $host, ?string $sshUser): void
