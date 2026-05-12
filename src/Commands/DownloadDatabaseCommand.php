@@ -42,6 +42,14 @@ class DownloadDatabaseCommand extends Command
 
     protected ?string $table = null;
 
+    /**
+     * Cached per-host result of the remote dump-binary / flag probe.
+     * Keyed by "{ssh_user}@{host}" so probing different remotes during one run stays correct.
+     *
+     * @var array<string, array{binary: string, flags: string}>
+     */
+    protected array $remoteDumpConfigCache = [];
+
     public function handle(): int
     {
         if (! $this->canRunInCurrentEnvironment()) {
@@ -459,8 +467,9 @@ class DownloadDatabaseCommand extends Command
 
         $optionNoData = Str::contains($source, 'structure') ? ' --no-data' : '';
         $localFile = $this->localPath.'/'.$this->dbName.'.sql';
+        ['binary' => $dumpBinary, 'flags' => $mysqldumpFlags] = $this->detectRemoteDumpConfig($config);
 
-        $command = $this->buildRemoteDumpCommand($config, $optionNoData, $localFile);
+        $command = $this->buildRemoteDumpCommand($config, $optionNoData, $localFile, $dumpBinary, $mysqldumpFlags);
 
         $this->components->task(
             "Dumping from {$config['host']}",
@@ -481,7 +490,7 @@ class DownloadDatabaseCommand extends Command
         ];
     }
 
-    protected function buildRemoteDumpCommand(array $config, string $optionNoData, string $localFile): string
+    protected function buildRemoteDumpCommand(array $config, string $optionNoData, string $localFile, string $dumpBinary = 'mysqldump', string $mysqldumpFlags = ''): string
     {
         $remoteConfig = escapeshellarg((string) $config['mysql_config_path']);
         $escapedDbName = escapeshellarg($this->dbName);
@@ -492,10 +501,85 @@ class DownloadDatabaseCommand extends Command
         if ($this->table !== null) {
             $escapedTable = escapeshellarg($this->table);
 
-            return "ssh {$escapedUser}@{$escapedHost} \"mysqldump --defaults-extra-file={$remoteConfig} --column-statistics=0 {$escapedDbName} {$escapedTable}{$optionNoData}\" > {$escapedLocalFile}";
+            return "ssh {$escapedUser}@{$escapedHost} \"{$dumpBinary} --defaults-extra-file={$remoteConfig}{$mysqldumpFlags} {$escapedDbName} {$escapedTable}{$optionNoData}\" > {$escapedLocalFile}";
         }
 
-        return "ssh {$escapedUser}@{$escapedHost} \"mysqldump --defaults-extra-file={$remoteConfig} --column-statistics=0 --databases {$escapedDbName}{$optionNoData}\" > {$escapedLocalFile}";
+        return "ssh {$escapedUser}@{$escapedHost} \"{$dumpBinary} --defaults-extra-file={$remoteConfig}{$mysqldumpFlags} --databases {$escapedDbName}{$optionNoData}\" > {$escapedLocalFile}";
+    }
+
+    /**
+     * Probe the remote once to discover which dump binary and version-specific flags to use.
+     *
+     * - Prefers `mariadb-dump` when present (silences the "Deprecated program name" warning
+     *   that MariaDB's `mysqldump` symlink prints to stderr on every invocation).
+     * - Adds `--column-statistics=0` only when the chosen binary's --help advertises it. The flag
+     *   was added in MySQL 8's mysqldump to suppress optimizer column-stats queries that fail
+     *   against pre-8 servers; MariaDB's dumper does not know the option and aborts with
+     *   "unknown variable".
+     *
+     * @return array{binary: string, flags: string}
+     */
+    protected function detectRemoteDumpConfig(array $config): array
+    {
+        $cacheKey = $config['ssh_user'].'@'.$config['host'];
+
+        if (isset($this->remoteDumpConfigCache[$cacheKey])) {
+            return $this->remoteDumpConfigCache[$cacheKey];
+        }
+
+        $escapedHost = escapeshellarg((string) $config['host']);
+        $escapedUser = escapeshellarg((string) $config['ssh_user']);
+
+        $probeScript = 'if command -v mariadb-dump >/dev/null 2>&1; then '
+            .'echo BIN=mariadb-dump; '
+            .'echo COL=no; '
+            .'else '
+            .'echo BIN=mysqldump; '
+            .'mysqldump --help 2>/dev/null | grep -q -- --column-statistics && echo COL=yes || echo COL=no; '
+            .'fi';
+
+        $probe = "ssh {$escapedUser}@{$escapedHost} ".escapeshellarg($probeScript);
+
+        $output = [];
+        exec($probe, $output);
+
+        $result = $this->parseRemoteDumpProbe($output);
+
+        if ($this->getOutput()->isVerbose()) {
+            $this->components->twoColumnDetail(
+                "Remote dump binary on {$config['host']}",
+                $result['binary'].($result['flags'] !== '' ? ' (with column-statistics)' : '')
+            );
+        }
+
+        return $this->remoteDumpConfigCache[$cacheKey] = $result;
+    }
+
+    /**
+     * Parse the lines emitted by the remote probe script.
+     *
+     * @param  array<int, string>  $output
+     * @return array{binary: string, flags: string}
+     */
+    protected function parseRemoteDumpProbe(array $output): array
+    {
+        $binary = 'mysqldump';
+        $supportsColumnStatistics = false;
+
+        foreach ($output as $line) {
+            if ($line === 'BIN=mariadb-dump' || $line === 'BIN=mysqldump') {
+                $binary = Str::after($line, 'BIN=');
+            } elseif ($line === 'COL=yes') {
+                $supportsColumnStatistics = true;
+            } elseif ($line === 'COL=no') {
+                $supportsColumnStatistics = false;
+            }
+        }
+
+        return [
+            'binary' => $binary,
+            'flags' => $supportsColumnStatistics ? ' --column-statistics=0' : '',
+        ];
     }
 
     protected function validateRemoteConfig(?string $host, ?string $sshUser): void

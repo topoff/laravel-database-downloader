@@ -56,3 +56,122 @@ it('validates table name accepts valid names', function (): void {
         ->and($method->invoke($command, 'user_profiles'))->toBe('user_profiles')
         ->and($method->invoke($command, 'my-table'))->toBe('my-table');
 });
+
+it('builds remote dump command without column-statistics when remote is MariaDB', function (): void {
+    $command = new DownloadDatabaseCommand;
+
+    $dbName = new ReflectionProperty($command, 'dbName');
+    $dbName->setValue($command, 'mydb');
+
+    $method = new ReflectionMethod($command, 'buildRemoteDumpCommand');
+    $config = [
+        'host' => 'remote.example.com',
+        'ssh_user' => 'deploy',
+        'mysql_config_path' => '~/mysql-login.cnf',
+    ];
+
+    $sql = $method->invoke($command, $config, '', '/tmp/mydb.sql', 'mariadb-dump', '');
+
+    expect($sql)->not->toContain('--column-statistics')
+        ->and($sql)->toContain('mariadb-dump --defaults-extra-file=')
+        ->and($sql)->toContain("ssh 'deploy'@'remote.example.com'")
+        ->and($sql)->toContain('--databases')
+        ->and($sql)->toContain("> '/tmp/mydb.sql'");
+});
+
+it('builds remote dump command with column-statistics when remote is MySQL 8+', function (): void {
+    $command = new DownloadDatabaseCommand;
+
+    $dbName = new ReflectionProperty($command, 'dbName');
+    $dbName->setValue($command, 'mydb');
+
+    $method = new ReflectionMethod($command, 'buildRemoteDumpCommand');
+    $config = [
+        'host' => 'remote.example.com',
+        'ssh_user' => 'deploy',
+        'mysql_config_path' => '~/mysql-login.cnf',
+    ];
+
+    $sql = $method->invoke($command, $config, '', '/tmp/mydb.sql', 'mysqldump', ' --column-statistics=0');
+
+    expect($sql)->toContain('mysqldump --defaults-extra-file=')
+        ->and($sql)->toContain('--column-statistics=0')
+        ->and($sql)->toContain('--databases');
+});
+
+it('respects structure-only and table-scoped variants when emitting flags', function (): void {
+    $command = new DownloadDatabaseCommand;
+
+    $dbName = new ReflectionProperty($command, 'dbName');
+    $dbName->setValue($command, 'mydb');
+
+    $table = new ReflectionProperty($command, 'table');
+    $table->setValue($command, 'users');
+
+    $method = new ReflectionMethod($command, 'buildRemoteDumpCommand');
+    $config = [
+        'host' => 'remote.example.com',
+        'ssh_user' => 'deploy',
+        'mysql_config_path' => '~/mysql-login.cnf',
+    ];
+
+    $sql = $method->invoke($command, $config, ' --no-data', '/tmp/mydb.sql', 'mariadb-dump', '');
+
+    expect($sql)->toContain("'mydb' 'users' --no-data")
+        ->and($sql)->toContain('mariadb-dump')
+        ->and($sql)->not->toContain('--column-statistics')
+        ->and($sql)->not->toContain('--databases');
+});
+
+it('caches remote dump config probe per host', function (): void {
+    $command = new DownloadDatabaseCommand;
+
+    $cache = new ReflectionProperty($command, 'remoteDumpConfigCache');
+    $cache->setValue($command, [
+        'deploy@remote.example.com' => ['binary' => 'mariadb-dump', 'flags' => ''],
+    ]);
+
+    $method = new ReflectionMethod($command, 'detectRemoteDumpConfig');
+    $config = [
+        'host' => 'remote.example.com',
+        'ssh_user' => 'deploy',
+        'mysql_config_path' => '~/mysql-login.cnf',
+    ];
+
+    expect($method->invoke($command, $config))->toBe(['binary' => 'mariadb-dump', 'flags' => '']);
+});
+
+it('parses probe output for MariaDB (prefers mariadb-dump, no flags)', function (): void {
+    $command = new DownloadDatabaseCommand;
+    $method = new ReflectionMethod($command, 'parseRemoteDumpProbe');
+
+    expect($method->invoke($command, ['BIN=mariadb-dump', 'COL=no']))
+        ->toBe(['binary' => 'mariadb-dump', 'flags' => '']);
+});
+
+it('parses probe output for MySQL 8 (mysqldump with column-statistics)', function (): void {
+    $command = new DownloadDatabaseCommand;
+    $method = new ReflectionMethod($command, 'parseRemoteDumpProbe');
+
+    expect($method->invoke($command, ['BIN=mysqldump', 'COL=yes']))
+        ->toBe(['binary' => 'mysqldump', 'flags' => ' --column-statistics=0']);
+});
+
+it('parses probe output for pre-8 MySQL (mysqldump, no column-statistics)', function (): void {
+    $command = new DownloadDatabaseCommand;
+    $method = new ReflectionMethod($command, 'parseRemoteDumpProbe');
+
+    expect($method->invoke($command, ['BIN=mysqldump', 'COL=no']))
+        ->toBe(['binary' => 'mysqldump', 'flags' => '']);
+});
+
+it('falls back to safe defaults when probe output is empty or unrecognised', function (): void {
+    $command = new DownloadDatabaseCommand;
+    $method = new ReflectionMethod($command, 'parseRemoteDumpProbe');
+
+    expect($method->invoke($command, []))
+        ->toBe(['binary' => 'mysqldump', 'flags' => '']);
+
+    expect($method->invoke($command, ['junk', 'BIN=evil; rm -rf /', 'COL=maybe']))
+        ->toBe(['binary' => 'mysqldump', 'flags' => '']);
+});
