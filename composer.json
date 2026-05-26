@@ -7,7 +7,7 @@
     "homepage": "https://github.com/topoff/laravel-database-downloader",
     "license": "MIT",
     "require": {
-        "php": "^8.3",
+        "php": "^8.4",
         "spatie/laravel-package-tools": "^1.16"
     },
     "require-dev": {
