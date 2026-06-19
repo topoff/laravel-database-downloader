@@ -40,6 +40,29 @@ You'll be prompted to:
 - `--dbName=`: Use a different database name instead of the default.
 - `--import-from-local-file-path=`: Import from a specific local file instead of downloading.
 
+### Creating the database
+
+To create the database itself (a plain `CREATE DATABASE`) with the charset and
+collation defined in `config/database.php`, use:
+
+```bash
+php artisan db:create
+```
+
+Laravel's `migrate` only applies the configured charset/collation when creating
+**tables** — it does not create the database. This command fills that gap by
+issuing `CREATE DATABASE IF NOT EXISTS ... DEFAULT CHARACTER SET ... COLLATE ...`
+using the credentials of the configured connection.
+
+#### Options
+
+- `--dbName=`: Use a different database name instead of the configured one.
+- `--charset=`: Override the charset (defaults to the connection charset).
+- `--collation=`: Override the collation (defaults to the connection collation).
+- `--dropExisting`: Drop the database first if it already exists.
+
+Like `db:download`, this command refuses to run in the `production` environment.
+
 ### Events
 
 After a successful import, the package dispatches a `Topoff\DatabaseDownloader\Events\DatabaseImported` event. You can listen to this event to perform post-import tasks like data sanitization or environment-specific adjustments.

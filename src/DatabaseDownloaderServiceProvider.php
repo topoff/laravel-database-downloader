@@ -6,6 +6,7 @@ namespace Topoff\DatabaseDownloader;
 
 use Spatie\LaravelPackageTools\Package;
 use Spatie\LaravelPackageTools\PackageServiceProvider;
+use Topoff\DatabaseDownloader\Commands\CreateDatabaseCommand;
 use Topoff\DatabaseDownloader\Commands\DownloadDatabaseCommand;
 
 class DatabaseDownloaderServiceProvider extends PackageServiceProvider
@@ -20,6 +21,9 @@ class DatabaseDownloaderServiceProvider extends PackageServiceProvider
         $package
             ->name('laravel-database-downloader')
             ->hasConfigFile()
-            ->hasCommand(DownloadDatabaseCommand::class);
+            ->hasCommands([
+                DownloadDatabaseCommand::class,
+                CreateDatabaseCommand::class,
+            ]);
     }
 }
