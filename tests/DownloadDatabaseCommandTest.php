@@ -146,7 +146,7 @@ it('parses probe output for MariaDB (prefers mariadb-dump, no flags)', function 
     $method = new ReflectionMethod($command, 'parseRemoteDumpProbe');
 
     expect($method->invoke($command, ['BIN=mariadb-dump', 'COL=no']))
-        ->toBe(['binary' => 'mariadb-dump', 'flags' => '']);
+        ->toBe(['binary' => 'mariadb-dump', 'flags' => ' --no-tablespaces']);
 });
 
 it('parses probe output for MySQL 8 (mysqldump with column-statistics)', function (): void {
@@ -154,7 +154,7 @@ it('parses probe output for MySQL 8 (mysqldump with column-statistics)', functio
     $method = new ReflectionMethod($command, 'parseRemoteDumpProbe');
 
     expect($method->invoke($command, ['BIN=mysqldump', 'COL=yes']))
-        ->toBe(['binary' => 'mysqldump', 'flags' => ' --column-statistics=0']);
+        ->toBe(['binary' => 'mysqldump', 'flags' => ' --no-tablespaces --column-statistics=0']);
 });
 
 it('parses probe output for pre-8 MySQL (mysqldump, no column-statistics)', function (): void {
@@ -162,7 +162,7 @@ it('parses probe output for pre-8 MySQL (mysqldump, no column-statistics)', func
     $method = new ReflectionMethod($command, 'parseRemoteDumpProbe');
 
     expect($method->invoke($command, ['BIN=mysqldump', 'COL=no']))
-        ->toBe(['binary' => 'mysqldump', 'flags' => '']);
+        ->toBe(['binary' => 'mysqldump', 'flags' => ' --no-tablespaces']);
 });
 
 it('falls back to safe defaults when probe output is empty or unrecognised', function (): void {
@@ -170,8 +170,8 @@ it('falls back to safe defaults when probe output is empty or unrecognised', fun
     $method = new ReflectionMethod($command, 'parseRemoteDumpProbe');
 
     expect($method->invoke($command, []))
-        ->toBe(['binary' => 'mysqldump', 'flags' => '']);
+        ->toBe(['binary' => 'mysqldump', 'flags' => ' --no-tablespaces']);
 
     expect($method->invoke($command, ['junk', 'BIN=evil; rm -rf /', 'COL=maybe']))
-        ->toBe(['binary' => 'mysqldump', 'flags' => '']);
+        ->toBe(['binary' => 'mysqldump', 'flags' => ' --no-tablespaces']);
 });

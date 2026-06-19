@@ -433,6 +433,10 @@ class DownloadDatabaseCommand extends Command
      *   was added in MySQL 8's mysqldump to suppress optimizer column-stats queries that fail
      *   against pre-8 servers; MariaDB's dumper does not know the option and aborts with
      *   "unknown variable".
+     * - Always adds `--no-tablespaces`. Since MySQL 5.7/8.0 mysqldump tries to dump tablespace
+     *   info, which requires the global PROCESS privilege that backup/dump users typically lack
+     *   ("Access denied; you need (at least one of) the PROCESS privilege(s)"). The flag skips
+     *   that step (irrelevant for ordinary data/structure dumps) and is supported by both binaries.
      *
      * @return array{binary: string, flags: string}
      */
@@ -495,7 +499,7 @@ class DownloadDatabaseCommand extends Command
 
         return [
             'binary' => $binary,
-            'flags' => $supportsColumnStatistics ? ' --column-statistics=0' : '',
+            'flags' => ' --no-tablespaces'.($supportsColumnStatistics ? ' --column-statistics=0' : ''),
         ];
     }
 
