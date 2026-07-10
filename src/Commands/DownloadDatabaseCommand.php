@@ -35,6 +35,16 @@ class DownloadDatabaseCommand extends Command
     protected ?string $table = null;
 
     /**
+     * Further SQL files to import after the primary one, in order. Filled when a
+     * backup archive contains multiple dumps (spatie three-dump split: small-backup /
+     * heavy-schema / heavy-data) — importing only one of them silently produced a
+     * database with nothing but messages + message_log.
+     *
+     * @var array<int, string>
+     */
+    protected array $additionalImportFiles = [];
+
+    /**
      * Cached per-host result of the remote dump-binary / flag probe.
      * Keyed by "{ssh_user}@{host}" so probing different remotes during one run stays correct.
      *
@@ -68,7 +78,8 @@ class DownloadDatabaseCommand extends Command
             }
 
             if ($this->table !== null) {
-                $fileToImport = $this->filterSqlFileForTable($fileToImport);
+                $fileToImport = $this->filterSqlFilesForTable([$fileToImport, ...$this->additionalImportFiles]);
+                $this->additionalImportFiles = [];
             }
 
             $this->importDatabase($fileToImport);
@@ -241,9 +252,22 @@ class DownloadDatabaseCommand extends Command
             return null;
         }
 
-        // In non-interactive mode, use the first existing file
+        // In non-interactive mode, use ALL existing sql files (a previous failed run
+        // may have left the extracted multi-dump backup behind — importing only the
+        // first would repeat the incomplete-import bug). Zip archives are ignored
+        // here when extracted files exist; with only a zip, the old path applies.
         if ($this->option('no-interaction')) {
-            return $this->processLocalFile($existingFiles[0]);
+            $sqlFiles = array_values(array_filter($existingFiles, fn (string $file): bool => ! Str::endsWith($file, '.zip')));
+
+            if ($sqlFiles === []) {
+                return $this->processLocalFile($existingFiles[0]);
+            }
+
+            sort($sqlFiles);
+            $processed = array_values(array_unique(array_map($this->processLocalFile(...), $sqlFiles)));
+            $this->additionalImportFiles = array_slice($processed, 1);
+
+            return $processed[0];
         }
 
         $choices = array_merge(
@@ -558,53 +582,76 @@ class DownloadDatabaseCommand extends Command
             fn (): ?string => $this->executeShellCommand("unzip -o {$escapedZipFile} -d {$escapedLocalPath}")
         );
 
-        $gzFile = $this->findGzFileInBackup();
-        $escapedGzFile = escapeshellarg($gzFile);
-        $this->components->task('Decompressing SQL file',
-            fn (): ?string => $this->executeShellCommand("gunzip -f {$escapedGzFile}")
-        );
+        $gzFiles = $this->selectBackupDumps(File::glob("{$this->localPath}db-dumps/*.sql.gz"));
 
-        return Str::replaceLast('.gz', '', $gzFile);
+        if (count($gzFiles) > 1) {
+            $this->components->info('Backup contains '.count($gzFiles).' dumps, importing all: '.implode(', ', array_map(basename(...), $gzFiles)));
+        }
+
+        $sqlFiles = [];
+        foreach ($gzFiles as $gzFile) {
+            $escapedGzFile = escapeshellarg($gzFile);
+            $this->components->task('Decompressing '.basename($gzFile),
+                fn (): ?string => $this->executeShellCommand("gunzip -f {$escapedGzFile}")
+            );
+            $sqlFiles[] = Str::replaceLast('.gz', '', $gzFile);
+        }
+
+        $this->additionalImportFiles = array_slice($sqlFiles, 1);
+
+        return $sqlFiles[0];
     }
 
-    protected function findGzFileInBackup(): string
+    /**
+     * Decide which dump files of a backup archive to import.
+     *
+     * Backups may contain MULTIPLE dumps of the same database (spatie three-dump
+     * split: mysql-small-backup + mysql-heavy-schema + mysql-heavy-data). All of
+     * them must be imported — importing only one silently produces an incomplete
+     * database. Sorted alphabetically the split imports in the right order: the
+     * heavy dumps create their tables first, and the small-backup dump — which
+     * carries the VIEW definitions referencing them — runs last.
+     *
+     * A file matching the legacy single-dump name `mysql-{db}.sql.gz` keeps the
+     * old exact-match behavior.
+     *
+     * @param  array<int, string>  $gzFiles
+     * @return array<int, string>
+     */
+    protected function selectBackupDumps(array $gzFiles): array
     {
-        $dbDumpsPath = "{$this->localPath}db-dumps/";
-        $gzFiles = File::glob("{$dbDumpsPath}*.sql.gz");
-
         if ($gzFiles === []) {
-            throw new RuntimeException("No .sql.gz file found in {$dbDumpsPath}");
+            throw new RuntimeException("No .sql.gz file found in {$this->localPath}db-dumps/");
         }
 
-        if (count($gzFiles) === 1) {
-            return $gzFiles[0];
-        }
-
-        // Multiple gz files: prefer one matching the local database name
         foreach ($gzFiles as $file) {
             if (Str::contains($file, "mysql-{$this->dbName}.sql.gz")) {
-                return $file;
+                return [$file];
             }
         }
 
-        $fileNames = array_map(basename(...), $gzFiles);
+        sort($gzFiles);
 
-        // In non-interactive mode, use the first file
-        if ($this->option('no-interaction')) {
-            $this->components->warn("Multiple SQL files found, using: {$fileNames[0]}");
+        return $gzFiles;
+    }
 
-            return $gzFiles[0];
+    /**
+     * Filter the given SQL files for the requested table; the first file that
+     * contains it wins. With multi-dump backups the table can live in any of them.
+     *
+     * @param  array<int, string>  $candidates
+     */
+    protected function filterSqlFilesForTable(array $candidates): string
+    {
+        foreach ($candidates as $candidate) {
+            try {
+                return $this->filterSqlFileForTable($candidate);
+            } catch (RuntimeException) {
+                continue;
+            }
         }
 
-        $choice = $this->components->choice(
-            'Multiple SQL files found in backup. Which one should be imported?',
-            $fileNames,
-            0
-        );
-
-        $index = array_search($choice, $fileNames, true);
-
-        return $gzFiles[$index];
+        throw new RuntimeException("Table '{$this->table}' was not found in any SQL file");
     }
 
     protected function filterSqlFileForTable(string $fileWithPath): string
@@ -656,6 +703,11 @@ class DownloadDatabaseCommand extends Command
         }
 
         $this->importSqlFile($fileWithPath);
+
+        foreach ($this->additionalImportFiles as $additionalFile) {
+            $this->components->info('Importing additional dump: '.basename($additionalFile));
+            $this->importSqlFile($additionalFile);
+        }
     }
 
     protected function importSqlFile(string $fileWithPath): void

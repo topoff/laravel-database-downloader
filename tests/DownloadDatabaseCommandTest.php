@@ -175,3 +175,55 @@ it('falls back to safe defaults when probe output is empty or unrecognised', fun
     expect($method->invoke($command, ['junk', 'BIN=evil; rm -rf /', 'COL=maybe']))
         ->toBe(['binary' => 'mysqldump', 'flags' => ' --no-tablespaces']);
 });
+
+it('selects all backup dumps sorted so the views-carrying small-backup imports last', function (): void {
+    $command = new DownloadDatabaseCommand;
+    new ReflectionProperty($command, 'dbName')->setValue($command, 'topofferten');
+    new ReflectionProperty($command, 'localPath')->setValue($command, '/tmp/dl/');
+    $method = new ReflectionMethod($command, 'selectBackupDumps');
+
+    $files = [
+        '/tmp/dl/db-dumps/mysql-small-backup-topofferten.sql.gz',
+        '/tmp/dl/db-dumps/mysql-heavy-data-topofferten.sql.gz',
+        '/tmp/dl/db-dumps/mysql-heavy-schema-topofferten.sql.gz',
+    ];
+
+    expect($method->invoke($command, $files))->toBe([
+        '/tmp/dl/db-dumps/mysql-heavy-data-topofferten.sql.gz',
+        '/tmp/dl/db-dumps/mysql-heavy-schema-topofferten.sql.gz',
+        '/tmp/dl/db-dumps/mysql-small-backup-topofferten.sql.gz',
+    ]);
+});
+
+it('prefers the legacy single-dump file matching the database name', function (): void {
+    $command = new DownloadDatabaseCommand;
+    new ReflectionProperty($command, 'dbName')->setValue($command, 'topofferten');
+    new ReflectionProperty($command, 'localPath')->setValue($command, '/tmp/dl/');
+    $method = new ReflectionMethod($command, 'selectBackupDumps');
+
+    $files = [
+        '/tmp/dl/db-dumps/mysql-other.sql.gz',
+        '/tmp/dl/db-dumps/mysql-topofferten.sql.gz',
+    ];
+
+    expect($method->invoke($command, $files))->toBe(['/tmp/dl/db-dumps/mysql-topofferten.sql.gz']);
+});
+
+it('keeps a single backup dump as-is', function (): void {
+    $command = new DownloadDatabaseCommand;
+    new ReflectionProperty($command, 'dbName')->setValue($command, 'topofferten');
+    new ReflectionProperty($command, 'localPath')->setValue($command, '/tmp/dl/');
+    $method = new ReflectionMethod($command, 'selectBackupDumps');
+
+    expect($method->invoke($command, ['/tmp/dl/db-dumps/mysql-anything.sql.gz']))
+        ->toBe(['/tmp/dl/db-dumps/mysql-anything.sql.gz']);
+});
+
+it('throws when the backup archive contains no sql dumps', function (): void {
+    $command = new DownloadDatabaseCommand;
+    new ReflectionProperty($command, 'dbName')->setValue($command, 'topofferten');
+    new ReflectionProperty($command, 'localPath')->setValue($command, '/tmp/dl/');
+    $method = new ReflectionMethod($command, 'selectBackupDumps');
+
+    expect(fn (): mixed => $method->invoke($command, []))->toThrow(RuntimeException::class);
+});
