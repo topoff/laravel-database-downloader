@@ -1,7 +1,7 @@
 # Team Memory: laravel-database-downloader
 
 This file contains deliberate, team-reviewed memory for this project.
-It is versioned in this repository and is intended for Claude Code, Codex, and OpenCode.
+It is versioned in this repository and is intended for Claude Code and Codex.
 
 ## Stable facts
 
