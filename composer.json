@@ -41,6 +41,10 @@
         }
     },
     "scripts": {
+        "gates": [
+            "@test",
+            "@clean"
+        ],
         "clean" : "vendor/bin/rector && vendor/bin/pint && vendor/bin/phpstan analyse",
         "post-autoload-dump": [
             "@clear",
