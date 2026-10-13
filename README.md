@@ -63,6 +63,49 @@ using the credentials of the configured connection.
 
 Like `db:download`, this command refuses to run in the `production` environment.
 
+### Anonymization
+
+Right after the import — and before the `DatabaseImported` event — the command overwrites
+contact data in the imported database, so no real personal data stays on development
+machines. This is **on by default** in every environment except `staging`
+(`DB_DOWNLOADER_ANONYMIZE=true|false` overrides the default; there is no CLI switch).
+
+- **Detected by column name** (text columns only): email (`email`, `*_email`, `email_backup`, …),
+  phone (`phone`, `*_phone`, `mobile`, `tel`, …) and street address (`address`, `address_2`,
+  `street`, `*_address`, …; not `ip_address`).
+- **Placeholders:** `<hash>@example.test`, `+4100…` (not dialable), `Musterstrasse <n>`.
+  They are derived from a salted hash, so the same email gets the same placeholder in all
+  tables of one run (unique indexes and joins on email keep working). The salt is random per
+  run and not stored. `NULL` and empty values stay as they are.
+- **Dump files are always deleted** while anonymization is on — also after a failed run,
+  without asking. A file passed via `--import-from-local-file-path` is yours: it is kept and
+  the command warns about it (inside the download directory you are asked first; in
+  non-interactive mode that directory is cleared as before).
+- **Failures:** if the import or the anonymization fails, the command anonymizes what was
+  imported (best effort), exits with an error, does not dispatch `DatabaseImported` and tells
+  you if the database may still contain real data.
+- A dump containing `CREATE DATABASE` / `USE` for another database than the import target is
+  rejected before the import.
+
+Configure the rest in `config/database-downloader.php`:
+
+```php
+// columns the name detection cannot know, or wrong matches to exclude
+'anonymize_columns' => [
+    'email_log' => ['to' => 'contact'],            // 'email' | 'phone' | 'address' | 'contact'
+    'users' => ['email_invalid_reason' => false],  // false = leave untouched
+],
+// email addresses of these domains are kept (per value)
+'anonymize_keep_email_domains' => ['your-company.com'],
+// rows matching the SQL condition are kept entirely
+'anonymize_keep_rows' => ['users' => 'is_admin = 1'],
+```
+
+**Limits:** only email, phone and street address are overwritten — names, postcodes, free
+text and anything in JSON columns stay real. Columns with unusual names are not detected;
+add them to `anonymize_columns`. Importing a single table (`--table`) uses a new salt, so its
+placeholder emails no longer match those of an earlier full import.
+
 ### Events
 
 After a successful import, the package dispatches a `Topoff\DatabaseDownloader\Events\DatabaseImported` event. You can listen to this event to perform post-import tasks like data sanitization or environment-specific adjustments.

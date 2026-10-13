@@ -5,6 +5,7 @@ namespace Topoff\DatabaseDownloader\Concerns;
 use Illuminate\Support\Facades\App;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Str;
 use RuntimeException;
 
@@ -158,6 +159,31 @@ trait InteractsWithMysql
         }
 
         return $output[0] ?? null;
+    }
+
+    /**
+     * Run SQL through the mysql CLI, fed via stdin so the statements never show up
+     * in the process list or in a file. Returns the output lines (tab-separated).
+     *
+     * @return array<int, string>
+     */
+    protected function runMysqlWithInput(string $sql, bool $selectDatabase = true): array
+    {
+        $command = $this->mysqlBasicCommand.' --batch --skip-column-names';
+
+        if ($selectDatabase) {
+            $command .= ' '.escapeshellarg($this->dbName);
+        }
+
+        $result = Process::forever()->input($sql)->run($command);
+
+        if ($result->failed()) {
+            throw new RuntimeException('MySQL command failed: '.trim($result->errorOutput()));
+        }
+
+        $output = trim($result->output());
+
+        return $output === '' ? [] : explode("\n", $output);
     }
 
     /**

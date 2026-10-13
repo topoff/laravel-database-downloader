@@ -3,6 +3,7 @@
 namespace Topoff\DatabaseDownloader\Commands;
 
 use Illuminate\Console\Command;
+use Illuminate\Support\Facades\App;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
@@ -11,6 +12,7 @@ use RuntimeException;
 use Throwable;
 use Topoff\DatabaseDownloader\Concerns\InteractsWithMysql;
 use Topoff\DatabaseDownloader\Events\DatabaseImported;
+use Topoff\DatabaseDownloader\Support\AnonymizationSqlBuilder;
 
 class DownloadDatabaseCommand extends Command
 {
@@ -52,6 +54,13 @@ class DownloadDatabaseCommand extends Command
      */
     protected array $remoteDumpConfigCache = [];
 
+    /** Dump files (real data) are on disk under the local path. */
+    protected bool $dumpFilesInUse = false;
+
+    protected bool $importStarted = false;
+
+    protected bool $anonymizationCompleted = false;
+
     public function handle(): int
     {
         if (! $this->canRunInCurrentEnvironment()) {
@@ -59,6 +68,10 @@ class DownloadDatabaseCommand extends Command
 
             return self::FAILURE;
         }
+
+        $this->dumpFilesInUse = false;
+        $this->importStarted = false;
+        $this->anonymizationCompleted = false;
 
         $this->source = $this->determineSource();
 
@@ -82,7 +95,13 @@ class DownloadDatabaseCommand extends Command
                 $this->additionalImportFiles = [];
             }
 
+            if ($this->shouldAnonymize()) {
+                $this->assertDumpsTargetDatabase([$fileToImport, ...$this->additionalImportFiles]);
+            }
+
+            $this->importStarted = true;
             $this->importDatabase($fileToImport);
+            $this->anonymizePersonalData();
             $this->dispatchEvents();
             $this->cleanup();
 
@@ -96,6 +115,8 @@ class DownloadDatabaseCommand extends Command
                 'exception' => $t,
                 'trace' => $t->getTraceAsString(),
             ]);
+
+            $this->handleFailureWithPersonalData();
 
             return self::FAILURE;
         } finally {
@@ -231,10 +252,13 @@ class DownloadDatabaseCommand extends Command
 
         $existingFile = $this->handleExistingFiles();
         if ($existingFile !== null) {
+            $this->dumpFilesInUse = true;
+
             return $existingFile;
         }
 
         $this->ensureLocalDirectoryExists();
+        $this->dumpFilesInUse = true;
 
         return $this->downloadSqlData($this->source);
     }
@@ -769,6 +793,243 @@ class DownloadDatabaseCommand extends Command
         return "LC_ALL=C sed -E 's/DEFINER=`[^`]+`@`[^`]+`//g; s/SQL SECURITY DEFINER/SQL SECURITY INVOKER/g'";
     }
 
+    /**
+     * Anonymization is on unless configured otherwise. A missing key (stale config
+     * cache from before the option existed) falls back to the same rule as the
+     * config default: everywhere except staging.
+     */
+    protected function shouldAnonymize(): bool
+    {
+        return (bool) (config('database-downloader.anonymize') ?? ! App::environment('staging'));
+    }
+
+    /**
+     * Dumps created with `--databases` carry CREATE DATABASE / USE statements. If
+     * they name another database than the import target (`--dbName`), the data
+     * would land there — and the anonymization would run on the wrong schema.
+     *
+     * @param  array<int, string>  $files
+     */
+    protected function assertDumpsTargetDatabase(array $files): void
+    {
+        foreach ($files as $file) {
+            $lines = [];
+            exec('LC_ALL=C grep -a -i -E '.escapeshellarg('^[[:space:]]*(USE|CREATE[[:space:]]+(DATABASE|SCHEMA))[[:space:]]').' '.escapeshellarg($file), $lines);
+
+            foreach ($lines as $line) {
+                $database = $this->parseTargetDatabase($line);
+
+                if ($database !== $this->dbName) {
+                    throw new RuntimeException(
+                        'The dump '.basename($file)." writes into database '".($database ?? trim($line))."', but '{$this->dbName}' would be anonymized. "
+                        .'Import aborted. Use a matching --dbName or a dump without CREATE DATABASE / USE statements.'
+                    );
+                }
+            }
+        }
+    }
+
+    /**
+     * Extract the database name from a USE / CREATE DATABASE line; null if it cannot be read.
+     */
+    protected function parseTargetDatabase(string $line): ?string
+    {
+        $pattern = '/^\s*(?:USE|CREATE\s+(?:DATABASE|SCHEMA)(?:\s*\/\*.*?\*\/)?(?:\s+IF\s+NOT\s+EXISTS)?)\s*(?:`([^`]+)`|([^\s;`]+))/i';
+
+        if (! preg_match($pattern, $line, $matches)) {
+            return null;
+        }
+
+        return $matches[1] !== '' ? $matches[1] : $matches[2];
+    }
+
+    /**
+     * Overwrite contact data (email, phone, street address) in the imported
+     * database with placeholders, before any listener gets to see it.
+     */
+    protected function anonymizePersonalData(bool $continueOnError = false): void
+    {
+        if (! $this->shouldAnonymize()) {
+            $this->components->warn('Anonymization is disabled: personal data is NOT overwritten.');
+
+            return;
+        }
+
+        $this->components->info('Anonymizing personal data');
+
+        $builder = new AnonymizationSqlBuilder(
+            (string) config('database-downloader.anonymize_email_domain', 'example.test'),
+            (array) config('database-downloader.anonymize_columns', []),
+            (array) config('database-downloader.anonymize_keep_email_domains', []),
+            (array) config('database-downloader.anonymize_keep_rows', []),
+        );
+
+        $tables = $builder->detect($this->fetchImportedColumns());
+
+        // The salt lives only for this run: statements go to mysql via stdin.
+        $salt = bin2hex(random_bytes(16));
+
+        // Build everything first, so a configuration error surfaces before the first UPDATE.
+        // In best-effort mode a table that cannot be built is skipped and reported instead.
+        $statements = [];
+        $failedTables = [];
+
+        foreach ($tables as $table => $columns) {
+            try {
+                $statements[$table] = $builder->build($table, $columns, $salt);
+            } catch (Throwable $t) {
+                if (! $continueOnError) {
+                    throw $t;
+                }
+
+                $failedTables[] = $table;
+                $this->logAndOutputError("Anonymizing {$table} failed: ".$t->getMessage());
+            }
+        }
+
+        foreach ($statements as $table => $statement) {
+            try {
+                $this->components->task(
+                    "Anonymizing {$table} (".implode(', ', array_keys($tables[$table])).')',
+                    function () use ($statement): void {
+                        $this->runMysqlWithInput($statement);
+                    }
+                );
+            } catch (Throwable $t) {
+                if (! $continueOnError) {
+                    throw $t;
+                }
+
+                $failedTables[] = $table;
+                $this->logAndOutputError("Anonymizing {$table} failed: ".$t->getMessage());
+            }
+        }
+
+        if ($failedTables !== []) {
+            throw new RuntimeException('Not anonymized: '.implode(', ', $failedTables));
+        }
+
+        $this->anonymizationCompleted = true;
+    }
+
+    /**
+     * List the columns of all base tables of the imported database.
+     *
+     * @return array<int, array{table: string, column: string, data_type: string, length: ?int, generated: bool}>
+     */
+    protected function fetchImportedColumns(): array
+    {
+        // dbName / table are validated to [a-zA-Z0-9_-], safe inside a string literal.
+        $sql = 'SELECT c.TABLE_NAME, c.COLUMN_NAME, c.DATA_TYPE, IFNULL(c.CHARACTER_MAXIMUM_LENGTH, 0), '
+            ."IF(IFNULL(c.GENERATION_EXPRESSION, '') = '', 0, 1) "
+            .'FROM information_schema.COLUMNS c '
+            .'JOIN information_schema.TABLES t ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME '
+            ."WHERE c.TABLE_SCHEMA = '{$this->dbName}' AND t.TABLE_TYPE = 'BASE TABLE'";
+
+        if ($this->table !== null) {
+            $sql .= " AND c.TABLE_NAME = '{$this->table}'";
+        }
+
+        $sql .= ' ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION;';
+
+        $columns = [];
+
+        foreach ($this->runMysqlWithInput($sql, false) as $line) {
+            $parts = explode("\t", $line);
+
+            if (count($parts) !== 5) {
+                throw new RuntimeException("Unexpected schema listing line: {$line}");
+            }
+
+            $columns[] = [
+                'table' => $parts[0],
+                'column' => $parts[1],
+                'data_type' => $parts[2],
+                'length' => (int) $parts[3] > 0 ? (int) $parts[3] : null,
+                'generated' => $parts[4] === '1',
+            ];
+        }
+
+        return $columns;
+    }
+
+    /**
+     * A failed run must not leave real personal data behind unnoticed: anonymize
+     * whatever got imported (best effort), say so if that was not possible, and
+     * remove the downloaded dumps.
+     */
+    protected function handleFailureWithPersonalData(): void
+    {
+        if (! $this->shouldAnonymize()) {
+            return;
+        }
+
+        // Also after a failed anonymization: retry once and carry on past a failing table.
+        if ($this->importStarted && ! $this->anonymizationCompleted) {
+            try {
+                $this->anonymizePersonalData(continueOnError: true);
+            } catch (Throwable $t) {
+                $this->logAndOutputError('Anonymization failed: '.$t->getMessage());
+            }
+        }
+
+        if ($this->importStarted && ! $this->anonymizationCompleted) {
+            $this->logAndOutputError("Database '{$this->dbName}' may still contain real personal data. Re-run the import or drop the database.");
+        }
+
+        if ($this->dumpFilesInUse && File::exists($this->localPath)) {
+            $this->removeDumpFiles();
+        }
+
+        $this->warnAboutLocalImportFile();
+    }
+
+    /**
+     * Delete the downloaded dumps. deleteDirectory() can fail silently, so the
+     * result is checked: left-over dumps with real data must not go unnoticed.
+     */
+    protected function removeDumpFiles(): void
+    {
+        try {
+            File::deleteDirectory($this->localPath);
+        } catch (Throwable $t) {
+            $this->components->error($t->getMessage());
+        }
+
+        if (File::exists($this->localPath)) {
+            $this->logAndOutputError("Dump files could not be removed and may contain real personal data: {$this->localPath}");
+
+            return;
+        }
+
+        $this->components->info('Removed downloaded dump files');
+    }
+
+    /**
+     * A file passed via --import-from-local-file-path is the user's own and is never deleted.
+     */
+    protected function warnAboutLocalImportFile(): void
+    {
+        $localFilePath = $this->option('import-from-local-file-path');
+
+        if (! $localFilePath || ! $this->shouldAnonymize()) {
+            return;
+        }
+
+        // processLocalFile() may have unpacked it: foo.zip / foo.sql.gz -> foo.sql
+        $candidates = array_unique([
+            $localFilePath,
+            Str::replaceLast('.sql.gz', '.sql', $localFilePath),
+            Str::replaceLast('.zip', '.sql', $localFilePath),
+        ]);
+
+        foreach ($candidates as $candidate) {
+            if (File::exists($candidate)) {
+                $this->components->warn("The import file still contains real personal data and was not deleted: {$candidate}");
+            }
+        }
+    }
+
     protected function dispatchEvents(): void
     {
         DatabaseImported::dispatch((bool) $this->option('files'));
@@ -797,16 +1058,18 @@ class DownloadDatabaseCommand extends Command
         }
 
         if (File::exists($this->localPath)) {
-            // In non-interactive mode, always delete
-            if ($this->option('no-interaction') || $this->components->confirm('Delete downloaded temporary files?', true)) {
-                try {
-                    $this->components->task('Removing temporary files', fn () => File::deleteDirectory($this->localPath));
-                } catch (Throwable $t) {
-                    $this->components->error($t->getMessage());
-                }
+            // Dumps this run put there (real data) are always deleted while anonymization
+            // is on. Otherwise — e.g. an own file passed via --import-from-local-file-path —
+            // only in non-interactive mode or when confirmed.
+            $mustDelete = $this->shouldAnonymize() && $this->dumpFilesInUse;
+
+            if ($mustDelete || $this->option('no-interaction') || $this->components->confirm('Delete downloaded temporary files?', true)) {
+                $this->removeDumpFiles();
             } else {
                 $this->components->info('Temporary files kept in: '.$this->localPath);
             }
         }
+
+        $this->warnAboutLocalImportFile();
     }
 }

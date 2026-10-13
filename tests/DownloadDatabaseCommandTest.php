@@ -1,9 +1,14 @@
 <?php
 
+use Illuminate\Contracts\Console\Kernel;
+use Illuminate\Process\PendingProcess;
 use Illuminate\Support\Facades\App;
 use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\File;
+use Illuminate\Support\Facades\Process;
 use Topoff\DatabaseDownloader\Commands\DownloadDatabaseCommand;
 use Topoff\DatabaseDownloader\Events\DatabaseImported;
+use Topoff\DatabaseDownloader\Tests\Fixtures\FakeDownloadDatabaseCommand;
 
 it('can run the db:download command help', function (): void {
     $this->artisan('db:download --help')
@@ -226,4 +231,181 @@ it('throws when the backup archive contains no sql dumps', function (): void {
     $method = new ReflectionMethod($command, 'selectBackupDumps');
 
     expect(fn (): mixed => $method->invoke($command, []))->toThrow(RuntimeException::class);
+});
+
+describe('anonymization', function (): void {
+    beforeEach(function (): void {
+        FakeDownloadDatabaseCommand::reset();
+        $this->app->make(Kernel::class)->registerCommand(new FakeDownloadDatabaseCommand);
+        Event::fake();
+    });
+
+    afterEach(function (): void {
+        File::deleteDirectory(FakeDownloadDatabaseCommand::localPath());
+    });
+
+    /** Fake the mysql CLI: one detectable column in the schema listing, UPDATEs succeed or fail. */
+    function fakeMysql(bool $updatesFail = false): void
+    {
+        Process::fake(fn (PendingProcess $process) => str_contains((string) $process->input, 'information_schema')
+            ? Process::result("users\temail\tvarchar\t100\t0\nusers\tid\tint\t0\t0\n")
+            : Process::result(errorOutput: $updatesFail ? 'ERROR 1062' : '', exitCode: $updatesFail ? 1 : 0));
+    }
+
+    $ranUpdate = fn (PendingProcess $process): bool => str_contains((string) $process->input, 'UPDATE `users` SET `email`');
+
+    it('overwrites personal data before the DatabaseImported event', function () use ($ranUpdate): void {
+        fakeMysql();
+
+        $this->artisan('db:download-fake')->assertExitCode(0);
+
+        Process::assertRan($ranUpdate);
+        Event::assertDispatched(DatabaseImported::class);
+        expect(File::exists(FakeDownloadDatabaseCommand::localPath()))->toBeFalse();
+    });
+
+    it('skips anonymization with a warning when disabled', function (): void {
+        config()->set('database-downloader.anonymize', false);
+        Process::fake();
+
+        $this->artisan('db:download-fake --no-interaction')
+            ->expectsOutputToContain('personal data is NOT overwritten')
+            ->assertExitCode(0);
+
+        Process::assertNothingRan();
+        Event::assertDispatched(DatabaseImported::class);
+    });
+
+    it('defaults to on, except in staging, when the config key is missing', function (): void {
+        config()->set('database-downloader.anonymize');
+        $method = new ReflectionMethod(DownloadDatabaseCommand::class, 'shouldAnonymize');
+
+        expect($method->invoke(new DownloadDatabaseCommand))->toBeTrue();
+
+        $this->app->detectEnvironment(fn (): string => 'staging');
+
+        expect($method->invoke(new DownloadDatabaseCommand))->toBeFalse();
+    });
+
+    it('fails without dispatching the event when anonymization fails', function (): void {
+        fakeMysql(updatesFail: true);
+
+        $this->artisan('db:download-fake')
+            ->expectsOutputToContain('may still contain real personal data')
+            ->assertExitCode(1);
+
+        Event::assertNotDispatched(DatabaseImported::class);
+        expect(File::exists(FakeDownloadDatabaseCommand::localPath()))->toBeFalse();
+    });
+
+    it('anonymizes what was imported when the import fails midway', function () use ($ranUpdate): void {
+        fakeMysql();
+        FakeDownloadDatabaseCommand::$failImport = true;
+
+        $this->artisan('db:download-fake')->assertExitCode(1);
+
+        Process::assertRan($ranUpdate);
+        Event::assertNotDispatched(DatabaseImported::class);
+        expect(File::exists(FakeDownloadDatabaseCommand::localPath()))->toBeFalse();
+    });
+
+    it('aborts before the import when the dump targets another database', function (): void {
+        fakeMysql();
+        FakeDownloadDatabaseCommand::$dumpContent = "CREATE DATABASE /*!32312 IF NOT EXISTS*/ `production_db`;\nUSE `production_db`;\n";
+
+        $this->artisan('db:download-fake')
+            ->expectsOutputToContain("writes into database 'production_db'")
+            ->assertExitCode(1);
+
+        expect(FakeDownloadDatabaseCommand::$importCalled)->toBeFalse();
+        Process::assertNothingRan();
+    });
+
+    it('reads the target database from USE / CREATE DATABASE lines', function (string $line, ?string $expected): void {
+        $method = new ReflectionMethod(DownloadDatabaseCommand::class, 'parseTargetDatabase');
+
+        expect($method->invoke(new DownloadDatabaseCommand, $line))->toBe($expected);
+    })->with([
+        ['USE `production_db`;', 'production_db'],
+        ['USE production_db;', 'production_db'],
+        ['  use production_db', 'production_db'],
+        ['CREATE DATABASE /*!32312 IF NOT EXISTS*/ `production_db` /*!40100 DEFAULT CHARACTER SET utf8mb4 */;', 'production_db'],
+        ['CREATE DATABASE IF NOT EXISTS production_db;', 'production_db'],
+        ['create schema `production_db`;', 'production_db'],
+        ['USE ;', null],
+    ]);
+
+    it('aborts on unquoted, lower-case and late USE statements', function (string $dump): void {
+        fakeMysql();
+        FakeDownloadDatabaseCommand::$dumpContent = $dump;
+
+        $this->artisan('db:download-fake')->assertExitCode(1);
+
+        expect(FakeDownloadDatabaseCommand::$importCalled)->toBeFalse();
+    })->with([
+        'unquoted' => ["USE production_db;\n"],
+        'lower-case, indented' => ["  use `production_db`;\n"],
+        'after many matching ones' => [str_repeat("USE `testdb`;\n", 80)."USE `production_db`;\n"],
+        'unreadable name' => ["USE ;\n"],
+    ]);
+
+    it('retries the anonymization after a failure and carries on past a failing table', function (): void {
+        $updates = 0;
+        Process::fake(function (PendingProcess $process) use (&$updates) {
+            if (str_contains((string) $process->input, 'information_schema')) {
+                return Process::result("leads\temail\tvarchar\t100\t0\nusers\temail\tvarchar\t100\t0\n");
+            }
+
+            $updates++;
+
+            // `leads` always fails; `users` must still be anonymized by the retry.
+            return str_contains((string) $process->input, 'UPDATE `leads`')
+                ? Process::result(errorOutput: 'ERROR 1205 Lock wait timeout', exitCode: 1)
+                : Process::result();
+        });
+
+        $this->artisan('db:download-fake')
+            ->expectsOutputToContain('Not anonymized: leads')
+            ->expectsOutputToContain('may still contain real personal data')
+            ->assertExitCode(1);
+
+        Process::assertRan(fn (PendingProcess $process): bool => str_contains((string) $process->input, 'UPDATE `users`'));
+        Event::assertNotDispatched(DatabaseImported::class);
+        expect($updates)->toBe(3); // leads (fails, aborts) → retry: leads (fails), users
+    });
+
+    it('still anonymizes the other tables when one table cannot be built', function (): void {
+        // leads.email is too short for a placeholder email → build() throws for that table
+        Process::fake(fn (PendingProcess $process) => str_contains((string) $process->input, 'information_schema')
+            ? Process::result("leads\temail\tvarchar\t20\t0\nusers\temail\tvarchar\t100\t0\n")
+            : Process::result());
+
+        $this->artisan('db:download-fake')
+            ->expectsOutputToContain('Not anonymized: leads')
+            ->assertExitCode(1);
+
+        Process::assertRan(fn (PendingProcess $process): bool => str_contains((string) $process->input, 'UPDATE `users`'));
+        Process::assertDidntRun(fn (PendingProcess $process): bool => str_contains((string) $process->input, 'UPDATE `leads`'));
+        Event::assertNotDispatched(DatabaseImported::class);
+    });
+
+    it('does not delete an own import file inside the local path without asking', function (): void {
+        fakeMysql();
+        FakeDownloadDatabaseCommand::$ownImportFile = true;
+
+        $this->artisan('db:download-fake')
+            ->expectsConfirmation('Delete downloaded temporary files?', 'no')
+            ->assertExitCode(0);
+
+        expect(File::exists(FakeDownloadDatabaseCommand::localPath().'testdb.sql'))->toBeTrue();
+    });
+
+    it('accepts a dump that names the target database', function (): void {
+        fakeMysql();
+        FakeDownloadDatabaseCommand::$dumpContent = "USE `testdb`;\n";
+
+        $this->artisan('db:download-fake')->assertExitCode(0);
+
+        expect(FakeDownloadDatabaseCommand::$importCalled)->toBeTrue();
+    });
 });

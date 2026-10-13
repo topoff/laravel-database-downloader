@@ -63,4 +63,34 @@ return [
      * Whether to use the defaults-extra-file for the mysql command.
      */
     'use_local_defaults_extra_file' => true,
+
+    /*
+     * Overwrite contact data (email, phone, street address) with placeholders right
+     * after the import, so no real personal data ends up on development machines.
+     * On by default everywhere except in the "staging" environment.
+     */
+    'anonymize' => env('DB_DOWNLOADER_ANONYMIZE', env('APP_ENV') !== 'staging'),
+
+    /*
+     * The domain of the placeholder email addresses.
+     */
+    'anonymize_email_domain' => 'example.test',
+
+    /*
+     * Columns are detected by name (email, *_email, phone, *_phone, mobile, address,
+     * street, ...). Add columns the detection cannot know, or exclude wrong matches:
+     * 'table' => ['column' => 'email'|'phone'|'address'|'contact'|false]
+     * "contact" holds either an email or a phone number; false excludes the column.
+     */
+    'anonymize_columns' => [],
+
+    /*
+     * Email addresses ending in one of these domains are kept (e.g. your own team).
+     */
+    'anonymize_keep_email_domains' => [],
+
+    /*
+     * Rows matching the SQL condition are kept entirely: 'table' => 'is_admin = 1'
+     */
+    'anonymize_keep_rows' => [],
 ];
