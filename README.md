@@ -95,7 +95,7 @@ Configure the rest in `config/database-downloader.php`:
     'email_log' => ['to' => 'contact'],            // 'email' | 'phone' | 'address' | 'contact'
     'users' => ['email_invalid_reason' => false],  // false = leave untouched
 ],
-// email addresses of these domains are kept (per value)
+// email addresses of these domains are kept (per value; a value listing several addresses never is)
 'anonymize_keep_email_domains' => ['your-company.com'],
 // rows matching the SQL condition are kept entirely
 'anonymize_keep_rows' => ['users' => 'is_admin = 1'],

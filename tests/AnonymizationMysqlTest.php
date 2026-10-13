@@ -44,7 +44,8 @@ beforeEach(function (): void {
         (4, 1,    'admin@gmail.com',      '+41 79 000 00 01', 'Adminweg 1'),
         (5, 0,    'team@top-offerten.ch', '+41 79 000 00 02', 'Teamweg 2')");
     $this->pdo->exec("INSERT INTO sent_emails VALUES (1, 'team@top-offerten.ch', 'Anna@Kunde.ch ')");
-    $this->pdo->exec("INSERT INTO email_log VALUES (1, 'anna@kunde.ch'), (2, '+41 79 123 45 67')");
+    $this->pdo->exec("INSERT INTO email_log VALUES (1, 'anna@kunde.ch'), (2, '+41 79 123 45 67'),
+        (3, 'Bcc: team@top-offerten.ch'), (4, 'Bcc: anna@kunde.ch, team@top-offerten.ch')");
 
     $this->builder = new AnonymizationSqlBuilder(
         columnOverrides: ['email_log' => ['to' => 'contact']],
@@ -118,6 +119,15 @@ it('replaces the same address identically across tables and per value in mixed r
         ->and($sent['recipient_email'])->toBe($anna)  // differs only in case / trailing space
         ->and($log[0])->toBe($anna)
         ->and($log[1])->toMatch('/^\+4100\d{12}$/');
+});
+
+it('keeps a team address but not a list that mixes in a foreign address', function (): void {
+    ($this->anonymize)();
+
+    $log = $this->pdo->query('SELECT `to` FROM email_log ORDER BY id')->fetchAll(PDO::FETCH_COLUMN);
+
+    expect($log[2])->toBe('Bcc: team@top-offerten.ch')
+        ->and($log[3])->toEndWith('@example.test');
 });
 
 it('can run again on already anonymized data', function (): void {

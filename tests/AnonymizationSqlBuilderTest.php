@@ -88,7 +88,7 @@ it('builds one update per table with a null-safe keep condition', function (): v
     ], ANONYMIZATION_TEST_SALT);
 
     expect(substr_count($sql, 'UPDATE `users` SET'))->toBe(1)
-        ->and($sql)->toContain("`email` LIKE '%@example.org'")
+        ->and($sql)->toContain("(`email` LIKE '%@example.org' AND `email` NOT LIKE '%@%@%')")
         ->and($sql)->not->toContain("`phone` LIKE '%@example.org'")
         ->and($sql)->toContain('@example.test')
         ->and($sql)->toContain('Musterstrasse')

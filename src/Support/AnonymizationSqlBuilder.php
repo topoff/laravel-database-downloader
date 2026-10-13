@@ -202,8 +202,9 @@ class AnonymizationSqlBuilder
         $keep = "{$quoted} IS NULL OR {$quoted} = ''";
 
         if ($holdsEmail) {
+            // a value listing several addresses is never kept: it may mix in a foreign one
             foreach ($this->keepEmailDomains as $domain) {
-                $keep .= " OR {$quoted} LIKE '%@{$domain}'";
+                $keep .= " OR ({$quoted} LIKE '%@{$domain}' AND {$quoted} NOT LIKE '%@%@%')";
             }
         }
 
