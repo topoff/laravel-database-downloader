@@ -24,7 +24,7 @@ class DownloadDatabaseCommand extends Command
     {--import-from-local-file-path= : Import from a specific local file instead of downloading}
     {--use-existing : Import already downloaded dump files regardless of their age, without asking}
     {--dropExisting : Drop the database before import if it exists}
-    {--files : Download and import files from public/storage}
+    {--files : Pass filesImported=true to the DatabaseImported event (an app listener imports the files)}
     {--table= : Import only a specific table}';
 
     protected $description = 'Import the live database from the live or backup server to local';
@@ -80,6 +80,8 @@ class DownloadDatabaseCommand extends Command
             $this->logStart();
         }
 
+        $this->trapAbortSignals();
+
         try {
             $this->prepare();
 
@@ -96,33 +98,55 @@ class DownloadDatabaseCommand extends Command
                 $this->additionalImportFiles = [];
             }
 
-            if ($this->shouldAnonymize()) {
-                $this->assertDumpsTargetDatabase([$fileToImport, ...$this->additionalImportFiles]);
-            }
+            $this->assertDumpsTargetDatabase([$fileToImport, ...$this->additionalImportFiles]);
 
             $this->importStarted = true;
             $this->importDatabase($fileToImport);
             $this->anonymizePersonalData();
             $this->dispatchEvents();
-            $this->cleanup();
+
+            if (! $this->cleanup()) {
+                return self::FAILURE;
+            }
 
             $this->logAndOutputInfo('Database import completed successfully');
             Log::debug('Finished '.static::class);
 
             return self::SUCCESS;
         } catch (Throwable $t) {
-            $this->logAndOutputError('Error: '.$t->getMessage());
-            Log::error('Database import failed', [
+            $this->components->error('Error: '.$t->getMessage());
+
+            // Clean up first: a failing logger must not leave real data behind.
+            $this->handleFailureWithPersonalData();
+
+            rescue(fn () => Log::error('Database import failed', [
                 'exception' => $t,
                 'trace' => $t->getTraceAsString(),
-            ]);
-
-            $this->handleFailureWithPersonalData();
+            ]), report: false);
 
             return self::FAILURE;
         } finally {
             $this->removeMysqlConfigFile();
         }
+    }
+
+    /**
+     * Ctrl+C or a kill must not skip the clean-up either: anonymize what got
+     * imported, remove the dumps and the credentials file, then exit.
+     */
+    protected function trapAbortSignals(): void
+    {
+        if (! extension_loaded('pcntl')) {
+            return;
+        }
+
+        $this->trap([SIGINT, SIGTERM], function (int $signal): never {
+            $this->components->error('Aborted by signal '.$signal);
+            $this->handleFailureWithPersonalData();
+            $this->removeMysqlConfigFile();
+
+            exit(128 + $signal);
+        });
     }
 
     protected function determineSource(): string
@@ -196,8 +220,9 @@ class DownloadDatabaseCommand extends Command
         $this->dbName = $this->validateDbName(
             $this->option('dbName') ?? config("database.connections.{$dbConnection}.database")
         );
-        $this->dbCharset = config("database.connections.{$dbConnection}.charset", 'utf8mb4');
-        $this->dbCollation = config("database.connections.{$dbConnection}.collation", 'utf8mb4_unicode_ci');
+        // Validated up front: an invalid value must fail before --dropExisting drops anything.
+        $this->dbCharset = $this->escapeMysqlIdentifier(config("database.connections.{$dbConnection}.charset", 'utf8mb4'));
+        $this->dbCollation = $this->escapeMysqlIdentifier(config("database.connections.{$dbConnection}.collation", 'utf8mb4_unicode_ci'));
 
         if ($this->option('table')) {
             $this->table = $this->validateTableName($this->option('table'));
@@ -213,12 +238,27 @@ class DownloadDatabaseCommand extends Command
             throw new RuntimeException('Local path cannot be empty');
         }
 
-        // Ensure path is within database directory for security
-        $realPath = realpath(dirname($path)) ?: dirname($path);
-        $databasePath = realpath(database_path()) ?: database_path();
+        // The directory gets deleted recursively: it must lie strictly inside the
+        // database directory. "." / ".." segments would escape the dirname() check.
+        if (preg_match('#(^|/)\.\.?(/|$)#', $path)) {
+            throw new RuntimeException('Local path must not contain "." or ".." segments');
+        }
 
-        if (! Str::startsWith($realPath, $databasePath)) {
-            throw new RuntimeException('Local path must be within the database directory');
+        $path = Str::finish($path, '/');
+        $databasePath = Str::finish(realpath(database_path()) ?: database_path(), '/');
+
+        // An existing directory is checked by its real path too: through a symlink the
+        // recursive delete would run in the link target.
+        $candidates = [Str::finish(realpath(dirname($path)) ?: dirname($path), '/').basename($path).'/'];
+
+        if (($realPath = realpath($path)) !== false) {
+            $candidates[] = Str::finish($realPath, '/');
+        }
+
+        foreach ($candidates as $candidate) {
+            if ($candidate === $databasePath || ! Str::startsWith($candidate, $databasePath)) {
+                throw new RuntimeException('Local path must be within the database directory');
+            }
         }
 
         return $path;
@@ -251,6 +291,11 @@ class DownloadDatabaseCommand extends Command
     protected function getFileToImport(): ?string
     {
         if ($localFilePath = $this->option('import-from-local-file-path')) {
+            // A .zip / .sql.gz is unpacked into the local path: those copies are ours to
+            // clean up — unless the given file itself lies in there.
+            $this->dumpFilesInUse = Str::endsWith($localFilePath, ['.zip', '.sql.gz'])
+                && ! Str::startsWith(realpath($localFilePath) ?: $localFilePath, Str::finish(realpath($this->localPath) ?: $this->localPath, '/'));
+
             return $this->processLocalFile($localFilePath);
         }
 
@@ -291,56 +336,48 @@ class DownloadDatabaseCommand extends Command
             return null;
         }
 
-        // In non-interactive mode, use ALL existing sql files (a previous failed run
-        // may have left the extracted multi-dump backup behind — importing only the
-        // first would repeat the incomplete-import bug). Zip archives are ignored
-        // here when extracted files exist; with only a zip, the old path applies.
-        if ($this->option('no-interaction') || $this->option('use-existing')) {
-            $sqlFiles = array_values(array_filter($existingFiles, fn (string $file): bool => ! Str::endsWith($file, '.zip')));
+        // One choice for all files: they belong together (a backup holds several dumps,
+        // importing just one of them leaves the database incomplete).
+        if (! $this->option('no-interaction') && ! $this->option('use-existing')) {
+            $choice = $this->components->choice(
+                'Found existing dump files ('.implode(', ', array_map(basename(...), $existingFiles)).'). What would you like to do?',
+                ['Use existing files', 'Enter custom path', 'Ignore and download fresh'],
+                0
+            );
 
-            if ($sqlFiles === []) {
-                return $this->extractBackupArchive($existingFiles[0]);
+            if ($choice === 'Ignore and download fresh') {
+                return null;
             }
 
-            sort($sqlFiles);
-            $processed = array_values(array_unique(array_map($this->processLocalFile(...), $sqlFiles)));
-            $this->additionalImportFiles = array_slice($processed, 1);
-
-            return $processed[0];
+            if ($choice === 'Enter custom path') {
+                return $this->processLocalFile((string) $this->components->ask('Enter the path to the SQL file'));
+            }
         }
 
-        $choices = array_merge(
-            array_map(fn (string $file): string => "Use: {$file}", $existingFiles),
-            [
-                'Enter custom path',
-                'Ignore and download fresh',
-            ]
-        );
+        return $this->useExistingFiles($existingFiles);
+    }
 
-        $choice = $this->components->choice(
-            'Found existing files. What would you like to do?',
-            $choices,
-            0
-        );
+    /**
+     * A left-behind backup archive wins over extracted files: an aborted run may
+     * have unpacked only part of it. Without an archive all dumps are imported.
+     *
+     * @param  array<string>  $existingFiles
+     */
+    protected function useExistingFiles(array $existingFiles): string
+    {
+        $zipFiles = array_values(array_filter($existingFiles, fn (string $file): bool => Str::endsWith($file, '.zip')));
 
-        if ($choice === 'Ignore and download fresh') {
-            return null;
+        if ($zipFiles !== []) {
+            rsort($zipFiles);
+
+            return $this->extractBackupArchive($zipFiles[0]);
         }
 
-        if ($choice === 'Enter custom path') {
-            $customPath = $this->components->ask('Enter the path to the SQL file');
+        sort($existingFiles);
+        $processed = array_values(array_unique(array_map($this->processLocalFile(...), $existingFiles)));
+        $this->additionalImportFiles = array_slice($processed, 1);
 
-            return $this->processLocalFile($customPath);
-        }
-
-        // Extract file path from choice (remove "Use: " prefix)
-        $selectedFile = Str::after($choice, 'Use: ');
-
-        if (Str::endsWith($selectedFile, '.zip')) {
-            return $this->extractBackupArchive($selectedFile);
-        }
-
-        return $this->processLocalFile($selectedFile);
+        return $processed[0];
     }
 
     /**
@@ -410,16 +447,16 @@ class DownloadDatabaseCommand extends Command
         $this->validateFilePath($filePath);
 
         if (Str::endsWith($filePath, '.zip')) {
-            $outputDir = escapeshellarg(dirname($filePath));
-            $escapedPath = escapeshellarg($filePath);
-            $this->executeShellCommand("unzip -o {$escapedPath} -d {$outputDir}");
-            $filePath = Str::replaceLast('.zip', '.sql.gz', $filePath);
+            return $this->extractBackupArchive($filePath);
         }
 
+        // Decompressed into the local path, so the given file stays untouched.
         if (Str::endsWith($filePath, '.sql.gz')) {
-            $escapedPath = escapeshellarg($filePath);
-            $this->executeShellCommand("gunzip -f {$escapedPath}");
-            $filePath = Str::replaceLast('.sql.gz', '.sql', $filePath);
+            File::ensureDirectoryExists($this->localPath);
+            $target = $this->localPath.basename($filePath, '.gz');
+            $this->executeShellCommand('gunzip -c '.escapeshellarg($filePath).' > '.escapeshellarg($target));
+
+            return $target;
         }
 
         return $filePath;
@@ -647,6 +684,17 @@ class DownloadDatabaseCommand extends Command
     protected function extractBackupArchive(string $zipFile): string
     {
         $this->validateFilePath($zipFile);
+        File::ensureDirectoryExists($this->localPath);
+
+        // Only this archive's dumps may be imported: no old or half-extracted left-overs.
+        // Only dump files go (the archive itself may lie in there); a symlink is just unlinked.
+        $dbDumpsPath = "{$this->localPath}db-dumps";
+
+        if (is_link($dbDumpsPath)) {
+            unlink($dbDumpsPath);
+        } else {
+            File::delete([...File::glob("{$dbDumpsPath}/*.sql"), ...File::glob("{$dbDumpsPath}/*.sql.gz")]);
+        }
 
         $escapedZipFile = escapeshellarg($zipFile);
         $escapedLocalPath = escapeshellarg($this->localPath);
@@ -728,18 +776,21 @@ class DownloadDatabaseCommand extends Command
 
     protected function filterSqlFileForTable(string $fileWithPath): string
     {
-        $filteredFile = dirname($fileWithPath).'/'.$this->table.'.sql';
+        // Own directory inside the local path: never the input file itself, not picked
+        // up as an existing dump by the next run, and removed with the other dumps.
+        $filteredFile = "{$this->localPath}table-filter/{$this->table}-".Str::random(8).'.sql';
+        File::ensureDirectoryExists(dirname($filteredFile));
 
         $escapedInput = escapeshellarg($fileWithPath);
         $escapedOutput = escapeshellarg($filteredFile);
 
         $escapedTable = escapeshellarg((string) $this->table);
 
+        // A table section starts with its "Table structure" comment or its DROP TABLE
+        // (dumps with --skip-comments) and ends at the marker of the next table.
         $command = "awk -v tbl={$escapedTable} '"
-            .'/^-- Table structure for table/ && found { exit } '
-            .'/^DROP TABLE IF EXISTS/ && found { exit } '
-            .'index($0, "-- Table structure for table `" tbl "`") { found=1 } '
-            .'index($0, "DROP TABLE IF EXISTS `" tbl "`") { found=1 } '
+            .'/^-- Table structure for table `/ || /^DROP TABLE IF EXISTS `/ { '
+            .'if (index($0, "`" tbl "`")) { found=1 } else if (found) { exit } } '
             ."found { print }' {$escapedInput} > {$escapedOutput}";
 
         $this->components->task(
@@ -796,7 +847,7 @@ class DownloadDatabaseCommand extends Command
                 'Importing SQL file',
                 function () use ($escapedDbName, $escapedFile, $definerFilter): void {
                     $command = "{$definerFilter} < {$escapedFile} | {$this->mysqlBasicCommand} {$escapedDbName}";
-                    $this->executeShellCommand($command);
+                    $this->executeShellCommand($this->withPipefail($command));
                 }
             );
         }
@@ -820,11 +871,20 @@ class DownloadDatabaseCommand extends Command
         }
 
         $resultCode = 0;
-        passthru($command, $resultCode);
+        passthru($this->withPipefail($command), $resultCode);
 
         if ($resultCode !== 0) {
             throw new RuntimeException("SQL import failed with exit code {$resultCode}");
         }
+    }
+
+    /**
+     * Without pipefail only mysql's exit code counts: an unreadable dump would end
+     * as a "successful" import of nothing.
+     */
+    protected function withPipefail(string $command): string
+    {
+        return 'bash -o pipefail -c '.escapeshellarg($command);
     }
 
     /**
@@ -838,7 +898,8 @@ class DownloadDatabaseCommand extends Command
      */
     protected function buildDefinerStripFilter(): string
     {
-        return "LC_ALL=C sed -E 's/DEFINER=`[^`]+`@`[^`]+`//g; s/SQL SECURITY DEFINER/SQL SECURITY INVOKER/g'";
+        // INSERT / REPLACE lines carry the row data: left untouched, so no stored text gets rewritten.
+        return "LC_ALL=C sed -E '/^(INSERT|REPLACE) /!{s/DEFINER=`[^`]+`@`[^`]+`//g; s/SQL SECURITY DEFINER/SQL SECURITY INVOKER/g;}'";
     }
 
     /**
@@ -869,7 +930,7 @@ class DownloadDatabaseCommand extends Command
 
                 if ($database !== $this->dbName) {
                     throw new RuntimeException(
-                        'The dump '.basename($file)." writes into database '".($database ?? trim($line))."', but '{$this->dbName}' would be anonymized. "
+                        'The dump '.basename($file)." writes into database '".($database ?? trim($line))."', but the import target is '{$this->dbName}'. "
                         .'Import aborted. Use a matching --dbName or a dump without CREATE DATABASE / USE statements.'
                     );
                 }
@@ -1036,7 +1097,7 @@ class DownloadDatabaseCommand extends Command
      * Delete the downloaded dumps. deleteDirectory() can fail silently, so the
      * result is checked: left-over dumps with real data must not go unnoticed.
      */
-    protected function removeDumpFiles(): void
+    protected function removeDumpFiles(): bool
     {
         try {
             File::deleteDirectory($this->localPath);
@@ -1047,10 +1108,12 @@ class DownloadDatabaseCommand extends Command
         if (File::exists($this->localPath)) {
             $this->logAndOutputError("Dump files could not be removed and may contain real personal data: {$this->localPath}");
 
-            return;
+            return false;
         }
 
         $this->components->info('Removed downloaded dump files');
+
+        return true;
     }
 
     /**
@@ -1083,7 +1146,7 @@ class DownloadDatabaseCommand extends Command
         DatabaseImported::dispatch((bool) $this->option('files'));
     }
 
-    protected function cleanup(): void
+    protected function cleanup(): bool
     {
         $this->components->info('Cleaning up');
 
@@ -1105,6 +1168,8 @@ class DownloadDatabaseCommand extends Command
             }
         }
 
+        $removed = true;
+
         if (File::exists($this->localPath)) {
             // Dumps this run put there (real data) are always deleted while anonymization
             // is on. Otherwise — e.g. an own file passed via --import-from-local-file-path —
@@ -1112,12 +1177,15 @@ class DownloadDatabaseCommand extends Command
             $mustDelete = $this->shouldAnonymize() && $this->dumpFilesInUse;
 
             if ($mustDelete || $this->option('no-interaction') || $this->components->confirm('Delete downloaded temporary files?', true)) {
-                $this->removeDumpFiles();
+                // Real data left on disk while anonymization is on fails the run.
+                $removed = $this->removeDumpFiles() || ! $this->shouldAnonymize();
             } else {
                 $this->components->info('Temporary files kept in: '.$this->localPath);
             }
         }
 
         $this->warnAboutLocalImportFile();
+
+        return $removed;
     }
 }

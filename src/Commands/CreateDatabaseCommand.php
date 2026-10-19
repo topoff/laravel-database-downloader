@@ -65,10 +65,11 @@ class CreateDatabaseCommand extends Command
         $this->dbName = $this->validateDbName(
             $this->option('dbName') ?? config("database.connections.{$dbConnection}.database")
         );
-        $this->dbCharset = $this->option('charset')
-            ?? config("database.connections.{$dbConnection}.charset", 'utf8mb4');
-        $this->dbCollation = $this->option('collation')
-            ?? config("database.connections.{$dbConnection}.collation", 'utf8mb4_unicode_ci');
+        // Validated up front: an invalid value must fail before --dropExisting drops anything.
+        $this->dbCharset = $this->escapeMysqlIdentifier($this->option('charset')
+            ?? config("database.connections.{$dbConnection}.charset", 'utf8mb4'));
+        $this->dbCollation = $this->escapeMysqlIdentifier($this->option('collation')
+            ?? config("database.connections.{$dbConnection}.collation", 'utf8mb4_unicode_ci'));
 
         $this->createMysqlConfigFile($dbConnection);
     }

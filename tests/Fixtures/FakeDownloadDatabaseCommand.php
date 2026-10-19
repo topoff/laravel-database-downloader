@@ -26,6 +26,9 @@ class FakeDownloadDatabaseCommand extends DownloadDatabaseCommand
 
     public static bool $downloaded = false;
 
+    /** @var array<int, string> Content of every file the import received, in order. */
+    public static array $importedContents = [];
+
     public function __construct()
     {
         $this->signature = str_replace('db:download', 'db:download-fake', $this->signature);
@@ -41,6 +44,7 @@ class FakeDownloadDatabaseCommand extends DownloadDatabaseCommand
         self::$dumpContent = "INSERT INTO `users` VALUES (1);\n";
         self::$realFileLookup = false;
         self::$downloaded = false;
+        self::$importedContents = [];
     }
 
     public static function localPath(): string
@@ -54,6 +58,10 @@ class FakeDownloadDatabaseCommand extends DownloadDatabaseCommand
         $this->dbName = 'testdb';
         $this->localPath = self::localPath();
         $this->mysqlBasicCommand = 'mysql';
+
+        if ($this->option('table')) {
+            $this->table = $this->validateTableName($this->option('table'));
+        }
     }
 
     #[\Override]
@@ -83,6 +91,7 @@ class FakeDownloadDatabaseCommand extends DownloadDatabaseCommand
     protected function importDatabase(string $fileWithPath): void
     {
         self::$importCalled = true;
+        self::$importedContents = array_map(File::get(...), [$fileWithPath, ...$this->additionalImportFiles]);
 
         if (self::$failImport) {
             throw new RuntimeException('import broke');

@@ -56,9 +56,16 @@ trait InteractsWithMysql
         // Build config content
         $content = $this->buildMysqlConfigContent($credentials);
 
-        // Create file with restricted permissions
-        File::put($this->mysqlConfigPath, $content);
-        chmod($this->mysqlConfigPath, 0600); // Only owner can read/write
+        // Created with restricted permissions: never readable by others, not even briefly
+        $previousUmask = umask(0077);
+
+        try {
+            File::put($this->mysqlConfigPath, $content);
+        } finally {
+            umask($previousUmask);
+        }
+
+        chmod($this->mysqlConfigPath, 0600);
 
         $this->mysqlBasicCommand = 'mysql --defaults-extra-file='.escapeshellarg($this->mysqlConfigPath);
     }
@@ -93,12 +100,25 @@ trait InteractsWithMysql
     {
         return implode("\n", [
             '[client]',
-            'user = '.escapeshellarg((string) $credentials['username']),
-            'password = '.escapeshellarg($credentials['password'] ?? ''),
-            'host = '.escapeshellarg((string) $credentials['host']),
-            'port = '.escapeshellarg((string) $credentials['port']),
+            'user = '.$this->quoteOptionValue((string) $credentials['username']),
+            'password = '.$this->quoteOptionValue($credentials['password'] ?? ''),
+            'host = '.$this->quoteOptionValue((string) $credentials['host']),
+            'port = '.$this->quoteOptionValue((string) $credentials['port']),
             '',
         ]);
+    }
+
+    /**
+     * Option-file syntax, not shell syntax: inside double quotes MySQL reads \\ and \"
+     * as escapes. A line break cannot be expressed and is rejected.
+     */
+    protected function quoteOptionValue(string $value): string
+    {
+        if (preg_match('/[\r\n]/', $value)) {
+            throw new RuntimeException('Database credentials must not contain line breaks');
+        }
+
+        return '"'.str_replace(['\\', '"'], ['\\\\', '\\"'], $value).'"';
     }
 
     protected function removeMysqlConfigFile(): void
@@ -112,9 +132,9 @@ trait InteractsWithMysql
 
     protected function dropDatabase(): void
     {
+        // Via stdin, so the backticks (needed for names like "my-db") never reach a shell.
         $safeDbName = $this->escapeMysqlIdentifier($this->dbName);
-        $command = "{$this->mysqlBasicCommand} --execute=\"DROP DATABASE IF EXISTS {$safeDbName}\"";
-        $this->executeShellCommand($command);
+        $this->runMysqlWithInput("DROP DATABASE IF EXISTS `{$safeDbName}`;", selectDatabase: false);
     }
 
     protected function createDatabase(): void
@@ -123,8 +143,7 @@ trait InteractsWithMysql
         $safeCharset = $this->escapeMysqlIdentifier($this->dbCharset);
         $safeCollation = $this->escapeMysqlIdentifier($this->dbCollation);
 
-        $command = "{$this->mysqlBasicCommand} --execute=\"CREATE DATABASE IF NOT EXISTS {$safeDbName} DEFAULT CHARACTER SET {$safeCharset} COLLATE {$safeCollation}\"";
-        $this->executeShellCommand($command);
+        $this->runMysqlWithInput("CREATE DATABASE IF NOT EXISTS `{$safeDbName}` DEFAULT CHARACTER SET {$safeCharset} COLLATE {$safeCollation};", selectDatabase: false);
     }
 
     /**
@@ -200,10 +219,14 @@ trait InteractsWithMysql
         throw new RuntimeException($errorMessage);
     }
 
+    /**
+     * A failing logger (full disk, broken channel) must not abort the caller: this
+     * also runs in the clean-up of real data after a failed import.
+     */
     protected function logAndOutputError(string $error): void
     {
         $this->error($error);
-        Log::error($error);
+        rescue(fn () => Log::error($error), report: false);
     }
 
     protected function logAndOutputInfo(string $info): void

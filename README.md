@@ -23,20 +23,22 @@ php artisan vendor:publish --tag="database-downloader-config"
 
 ## Usage
 
-The package provides an interactive command to download and import the database:
+The package provides a command to download and import the database:
 
 ```bash
 php artisan db:download
 ```
 
-You'll be prompted to:
-1. **Select the data source**: `backup`, `staging`, or `live`
-2. **Select dump type** (if staging or live): `Full dump` or `Only structure`
+By default it imports the latest backup (`--source=backup`).
 
 ### Options
 
+- `--source=`: `backup` (default), `staging-dump`, `staging-dump-structure`, `live-dump` or
+  `live-dump-structure`. A remote dump asks for confirmation (it briefly blocks the database).
 - `--dropExisting`: Drop the database before import if it exists.
-- `--files`: Download and import files from `public/storage`.
+- `--files`: Dispatch `DatabaseImported` with `filesImported = true`; the package itself does
+  not copy files — a listener in your app imports `public/storage`.
+- `--table=`: Import only this table out of the dump.
 - `--dbName=`: Use a different database name instead of the default.
 - `--import-from-local-file-path=`: Import from a specific local file instead of downloading.
 - `--use-existing`: Import the dump files an earlier run left in the local download directory,
@@ -44,7 +46,11 @@ You'll be prompted to:
 
 Dump files left in the local download directory by an earlier run are deleted and downloaded
 fresh without asking when they are older than 24 hours (config `existing_files_max_age_hours`).
-Younger files are offered for reuse.
+Younger files are offered for reuse — always all of them together (a backup holds several dumps),
+and a left-behind backup archive is unpacked again rather than trusting partly extracted files.
+
+A `.zip` or `.sql.gz` passed via `--import-from-local-file-path` is unpacked into the local
+download directory; the file itself stays untouched.
 
 ### Creating the database
 
@@ -91,7 +97,10 @@ machines. This is **on by default** in every environment except `staging`
   imported (best effort), exits with an error, does not dispatch `DatabaseImported` and tells
   you if the database may still contain real data.
 - A dump containing `CREATE DATABASE` / `USE` for another database than the import target is
-  rejected before the import.
+  rejected before the import (also with anonymization off).
+- **Aborted runs** (Ctrl+C, `kill`) get the same clean-up as failed ones (needs `ext-pcntl`).
+  A `kill` of only the PHP process takes effect once the running shell step (download, import)
+  has ended; Ctrl+C stops that step right away.
 
 Configure the rest in `config/database-downloader.php`:
 

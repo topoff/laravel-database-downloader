@@ -455,19 +455,24 @@ describe('existing dump files', function (): void {
             ->and(FakeDownloadDatabaseCommand::$importCalled)->toBeTrue();
     });
 
-    it('unpacks a left-behind backup archive into its db-dumps when --use-existing is given', function (): void {
+    it('re-extracts a left-behind backup archive instead of trusting partly extracted dumps', function (): void {
         $zipFile = FakeDownloadDatabaseCommand::localPath().'2026-10-18-04-00-06.zip';
-        File::ensureDirectoryExists(dirname($zipFile));
+        File::ensureDirectoryExists(FakeDownloadDatabaseCommand::localPath().'db-dumps');
         $zip = new ZipArchive;
         $zip->open($zipFile, ZipArchive::CREATE);
-        $zip->addFromString('db-dumps/mysql-heavy-data.sql.gz', gzencode("INSERT INTO `users` VALUES (3);\n"));
+        $zip->addFromString('db-dumps/mysql-heavy-data.sql.gz', gzencode("INSERT INTO `messages` VALUES (3);\n"));
         $zip->addFromString('db-dumps/mysql-small-backup.sql.gz', gzencode("INSERT INTO `users` VALUES (4);\n"));
         $zip->close();
+        // An aborted run got as far as one half-written dump.
+        File::put(FakeDownloadDatabaseCommand::localPath().'db-dumps/mysql-heavy-data.sql', 'INSERT INTO `mess');
 
         $this->artisan('db:download-fake --source=backup --use-existing')->assertExitCode(0);
 
         expect(FakeDownloadDatabaseCommand::$downloaded)->toBeFalse()
-            ->and(FakeDownloadDatabaseCommand::$importCalled)->toBeTrue();
+            ->and(FakeDownloadDatabaseCommand::$importedContents)->toBe([
+                "INSERT INTO `messages` VALUES (3);\n",
+                "INSERT INTO `users` VALUES (4);\n",
+            ]);
     })->skip(! class_exists(ZipArchive::class), 'ext-zip missing');
 
     it('respects a configured maximum age', function (): void {
@@ -483,8 +488,8 @@ describe('existing dump files', function (): void {
         $file = leaveDumpBehind(ageHours: 1);
 
         $this->artisan('db:download-fake --source=backup')
-            ->expectsChoice('Found existing files. What would you like to do?', 'Ignore and download fresh', [
-                "Use: {$file}",
+            ->expectsChoice('Found existing dump files (mysql-left-behind.sql). What would you like to do?', 'Ignore and download fresh', [
+                'Use existing files',
                 'Enter custom path',
                 'Ignore and download fresh',
             ])
@@ -493,4 +498,125 @@ describe('existing dump files', function (): void {
         expect(FakeDownloadDatabaseCommand::$downloaded)->toBeTrue()
             ->and(File::exists($file))->toBeFalse();
     });
+
+    it('imports all existing dumps together when chosen interactively', function (): void {
+        $dir = FakeDownloadDatabaseCommand::localPath().'db-dumps/';
+        File::ensureDirectoryExists($dir);
+        File::put($dir.'mysql-heavy-data.sql', "INSERT INTO `messages` VALUES (1);\n");
+        File::put($dir.'mysql-small-backup.sql', "INSERT INTO `users` VALUES (1);\n");
+
+        $this->artisan('db:download-fake --source=backup')
+            ->expectsChoice('Found existing dump files (mysql-heavy-data.sql, mysql-small-backup.sql). What would you like to do?', 'Use existing files', [
+                'Use existing files',
+                'Enter custom path',
+                'Ignore and download fresh',
+            ])
+            ->assertExitCode(0);
+
+        expect(FakeDownloadDatabaseCommand::$importedContents)->toHaveCount(2);
+    });
+
+    it('imports the whole table section with --table, also with dump comments', function (string $dump): void {
+        $dir = FakeDownloadDatabaseCommand::localPath();
+        File::ensureDirectoryExists($dir);
+        File::put($dir.'users.sql', $dump);
+
+        $this->artisan('db:download-fake --source=backup --table=users --use-existing')->assertExitCode(0);
+
+        expect(FakeDownloadDatabaseCommand::$importedContents[0])
+            ->toContain('CREATE TABLE `users`')
+            // The input is named like the table: had the filter truncated it first, this would be empty.
+            ->toContain('INSERT INTO `users`')
+            ->not->toContain('`users_log`');
+    })->with([
+        'with comments' => "--\n-- Table structure for table `users`\n--\n\nDROP TABLE IF EXISTS `users`;\nCREATE TABLE `users` (id int);\n\n--\n-- Dumping data for table `users`\n--\n\nINSERT INTO `users` VALUES (1);\n\n--\n-- Table structure for table `users_log`\n--\n\nDROP TABLE IF EXISTS `users_log`;\nCREATE TABLE `users_log` (id int);\n",
+        'skip-comments' => "DROP TABLE IF EXISTS `users`;\nCREATE TABLE `users` (id int);\nINSERT INTO `users` VALUES (1);\nDROP TABLE IF EXISTS `users_log`;\nCREATE TABLE `users_log` (id int);\n",
+    ]);
+});
+
+describe('own import files', function (): void {
+    beforeEach(function (): void {
+        FakeDownloadDatabaseCommand::reset();
+        FakeDownloadDatabaseCommand::$realFileLookup = true;
+        $this->app->make(Kernel::class)->registerCommand(new FakeDownloadDatabaseCommand);
+        Event::fake();
+        fakeMysql();
+        $this->ownDir = sys_get_temp_dir().'/dbdl-own-file/';
+        File::ensureDirectoryExists($this->ownDir);
+    });
+
+    afterEach(function (): void {
+        File::deleteDirectory(FakeDownloadDatabaseCommand::localPath());
+        File::deleteDirectory($this->ownDir);
+    });
+
+    it('decompresses an own .sql.gz into the local path and keeps the original', function (): void {
+        $ownFile = $this->ownDir.'dump.sql.gz';
+        File::put($ownFile, gzencode("INSERT INTO `users` VALUES (5);\n"));
+
+        $this->artisan('db:download-fake --no-interaction --import-from-local-file-path='.$ownFile)->assertExitCode(0);
+
+        expect(FakeDownloadDatabaseCommand::$importedContents)->toBe(["INSERT INTO `users` VALUES (5);\n"])
+            ->and(File::exists($ownFile))->toBeTrue()
+            ->and(File::exists($this->ownDir.'dump.sql'))->toBeFalse();
+    });
+
+    it('unpacks an own spatie backup archive', function (): void {
+        $ownFile = $this->ownDir.'backup.zip';
+        $zip = new ZipArchive;
+        $zip->open($ownFile, ZipArchive::CREATE);
+        $zip->addFromString('db-dumps/mysql-small-backup.sql.gz', gzencode("INSERT INTO `users` VALUES (6);\n"));
+        $zip->close();
+
+        $this->artisan('db:download-fake --no-interaction --import-from-local-file-path='.$ownFile)->assertExitCode(0);
+
+        expect(FakeDownloadDatabaseCommand::$importedContents)->toBe(["INSERT INTO `users` VALUES (6);\n"])
+            ->and(File::exists($ownFile))->toBeTrue();
+    })->skip(! class_exists(ZipArchive::class), 'ext-zip missing');
+});
+
+it('rejects a local path that escapes the database directory', function (string $path): void {
+    $method = new ReflectionMethod(DownloadDatabaseCommand::class, 'validateLocalPath');
+
+    expect(fn (): mixed => $method->invoke(new DownloadDatabaseCommand, $path))->toThrow(RuntimeException::class);
+})->with([
+    'parent segment' => fn (): string => database_path('../'),
+    'database dir itself' => fn (): string => database_path().'/',
+    'sibling with same prefix' => fn (): string => database_path().'-other/dumps/',
+]);
+
+it('accepts a local path inside the database directory and adds the trailing slash', function (): void {
+    $method = new ReflectionMethod(DownloadDatabaseCommand::class, 'validateLocalPath');
+
+    expect($method->invoke(new DownloadDatabaseCommand, database_path('import/dumps')))->toBe(database_path('import/dumps').'/');
+});
+
+it('rejects a local path that is a symlink out of the database directory', function (): void {
+    $target = sys_get_temp_dir().'/dbdl-symlink-target';
+    $link = database_path('dbdl-symlink-test');
+    File::ensureDirectoryExists($target);
+    @unlink($link);
+    symlink($target, $link);
+
+    try {
+        $method = new ReflectionMethod(DownloadDatabaseCommand::class, 'validateLocalPath');
+
+        expect(fn (): mixed => $method->invoke(new DownloadDatabaseCommand, $link.'/'))->toThrow(RuntimeException::class);
+    } finally {
+        unlink($link);
+        File::deleteDirectory($target);
+    }
+});
+
+it('strips DEFINER clauses from statements but not from row data', function (): void {
+    $method = new ReflectionMethod(DownloadDatabaseCommand::class, 'buildDefinerStripFilter');
+    $dump = "INSERT INTO `t` VALUES ('SQL SECURITY DEFINER','DEFINER=`a`@`b`');\n"
+        ."/*!50013 DEFINER=`forge`@`%` SQL SECURITY DEFINER */\n";
+
+    $result = Process::input($dump)->run($method->invoke(new DownloadDatabaseCommand));
+
+    expect($result->output())->toBe(
+        "INSERT INTO `t` VALUES ('SQL SECURITY DEFINER','DEFINER=`a`@`b`');\n"
+        ."/*!50013  SQL SECURITY INVOKER */\n"
+    );
 });

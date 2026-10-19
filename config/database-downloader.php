@@ -66,11 +66,6 @@ return [
     'existing_files_max_age_hours' => 24,
 
     /*
-     * Whether to use the defaults-extra-file for the mysql command.
-     */
-    'use_local_defaults_extra_file' => true,
-
-    /*
      * Overwrite contact data (email, phone, street address) with placeholders right
      * after the import, so no real personal data ends up on development machines.
      * On by default everywhere except in the "staging" environment.
