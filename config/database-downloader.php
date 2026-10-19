@@ -60,6 +60,12 @@ return [
     'local_path' => database_path('import/dumps/'),
 
     /*
+     * Dump files left in local_path by an earlier run that are older than this are
+     * deleted and downloaded fresh without asking. --use-existing imports them anyway.
+     */
+    'existing_files_max_age_hours' => 24,
+
+    /*
      * Whether to use the defaults-extra-file for the mysql command.
      */
     'use_local_defaults_extra_file' => true,

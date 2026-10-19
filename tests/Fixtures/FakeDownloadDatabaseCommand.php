@@ -21,6 +21,11 @@ class FakeDownloadDatabaseCommand extends DownloadDatabaseCommand
 
     public static string $dumpContent = "INSERT INTO `users` VALUES (1);\n";
 
+    /** Run the real lookup of existing files; only the download itself is faked. */
+    public static bool $realFileLookup = false;
+
+    public static bool $downloaded = false;
+
     public function __construct()
     {
         $this->signature = str_replace('db:download', 'db:download-fake', $this->signature);
@@ -34,6 +39,8 @@ class FakeDownloadDatabaseCommand extends DownloadDatabaseCommand
         self::$importCalled = false;
         self::$ownImportFile = false;
         self::$dumpContent = "INSERT INTO `users` VALUES (1);\n";
+        self::$realFileLookup = false;
+        self::$downloaded = false;
     }
 
     public static function localPath(): string
@@ -50,11 +57,24 @@ class FakeDownloadDatabaseCommand extends DownloadDatabaseCommand
     }
 
     #[\Override]
-    protected function getFileToImport(): string
+    protected function getFileToImport(): ?string
     {
+        if (self::$realFileLookup) {
+            return parent::getFileToImport();
+        }
+
         File::ensureDirectoryExists($this->localPath);
         File::put($this->localPath.'testdb.sql', self::$dumpContent);
         $this->dumpFilesInUse = ! self::$ownImportFile;
+
+        return $this->localPath.'testdb.sql';
+    }
+
+    #[\Override]
+    protected function downloadSqlData(string $source): string
+    {
+        self::$downloaded = true;
+        File::put($this->localPath.'testdb.sql', self::$dumpContent);
 
         return $this->localPath.'testdb.sql';
     }

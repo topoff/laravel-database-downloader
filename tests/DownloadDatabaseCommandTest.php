@@ -42,6 +42,7 @@ it('has the correct signature and options', function (): void {
         ->and($signature->hasOption('files'))->toBeTrue()
         ->and($signature->hasOption('dbName'))->toBeTrue()
         ->and($signature->hasOption('import-from-local-file-path'))->toBeTrue()
+        ->and($signature->hasOption('use-existing'))->toBeTrue()
         ->and($signature->hasOption('table'))->toBeTrue();
 });
 
@@ -407,5 +408,89 @@ describe('anonymization', function (): void {
         $this->artisan('db:download-fake')->assertExitCode(0);
 
         expect(FakeDownloadDatabaseCommand::$importCalled)->toBeTrue();
+    });
+});
+
+describe('existing dump files', function (): void {
+    beforeEach(function (): void {
+        FakeDownloadDatabaseCommand::reset();
+        FakeDownloadDatabaseCommand::$realFileLookup = true;
+        $this->app->make(Kernel::class)->registerCommand(new FakeDownloadDatabaseCommand);
+        Event::fake();
+        fakeMysql();
+    });
+
+    afterEach(function (): void {
+        File::deleteDirectory(FakeDownloadDatabaseCommand::localPath());
+    });
+
+    function leaveDumpBehind(int $ageHours): string
+    {
+        $file = FakeDownloadDatabaseCommand::localPath().'db-dumps/mysql-left-behind.sql';
+        File::ensureDirectoryExists(dirname($file));
+        File::put($file, "INSERT INTO `users` VALUES (2);\n");
+        touch($file, time() - $ageHours * 3600);
+
+        return $file;
+    }
+
+    it('deletes stale dumps and downloads fresh without asking', function (): void {
+        $staleFile = leaveDumpBehind(ageHours: 25);
+
+        $this->artisan('db:download-fake --source=backup')
+            ->expectsOutputToContain('older than 24 hours, downloading fresh')
+            ->assertExitCode(0);
+
+        expect(FakeDownloadDatabaseCommand::$downloaded)->toBeTrue()
+            ->and(FakeDownloadDatabaseCommand::$importCalled)->toBeTrue()
+            ->and(File::exists($staleFile))->toBeFalse();
+    });
+
+    it('imports stale dumps without asking when --use-existing is given', function (): void {
+        leaveDumpBehind(ageHours: 25);
+
+        $this->artisan('db:download-fake --source=backup --use-existing')->assertExitCode(0);
+
+        expect(FakeDownloadDatabaseCommand::$downloaded)->toBeFalse()
+            ->and(FakeDownloadDatabaseCommand::$importCalled)->toBeTrue();
+    });
+
+    it('unpacks a left-behind backup archive into its db-dumps when --use-existing is given', function (): void {
+        $zipFile = FakeDownloadDatabaseCommand::localPath().'2026-10-18-04-00-06.zip';
+        File::ensureDirectoryExists(dirname($zipFile));
+        $zip = new ZipArchive;
+        $zip->open($zipFile, ZipArchive::CREATE);
+        $zip->addFromString('db-dumps/mysql-heavy-data.sql.gz', gzencode("INSERT INTO `users` VALUES (3);\n"));
+        $zip->addFromString('db-dumps/mysql-small-backup.sql.gz', gzencode("INSERT INTO `users` VALUES (4);\n"));
+        $zip->close();
+
+        $this->artisan('db:download-fake --source=backup --use-existing')->assertExitCode(0);
+
+        expect(FakeDownloadDatabaseCommand::$downloaded)->toBeFalse()
+            ->and(FakeDownloadDatabaseCommand::$importCalled)->toBeTrue();
+    })->skip(! class_exists(ZipArchive::class), 'ext-zip missing');
+
+    it('respects a configured maximum age', function (): void {
+        config()->set('database-downloader.existing_files_max_age_hours', 48);
+        leaveDumpBehind(ageHours: 25);
+
+        $this->artisan('db:download-fake --source=backup --no-interaction')->assertExitCode(0);
+
+        expect(FakeDownloadDatabaseCommand::$downloaded)->toBeFalse();
+    });
+
+    it('asks only once when fresh dumps exist and a fresh download is chosen', function (): void {
+        $file = leaveDumpBehind(ageHours: 1);
+
+        $this->artisan('db:download-fake --source=backup')
+            ->expectsChoice('Found existing files. What would you like to do?', 'Ignore and download fresh', [
+                "Use: {$file}",
+                'Enter custom path',
+                'Ignore and download fresh',
+            ])
+            ->assertExitCode(0);
+
+        expect(FakeDownloadDatabaseCommand::$downloaded)->toBeTrue()
+            ->and(File::exists($file))->toBeFalse();
     });
 });

@@ -39,6 +39,12 @@ You'll be prompted to:
 - `--files`: Download and import files from `public/storage`.
 - `--dbName=`: Use a different database name instead of the default.
 - `--import-from-local-file-path=`: Import from a specific local file instead of downloading.
+- `--use-existing`: Import the dump files an earlier run left in the local download directory,
+  regardless of their age and without asking.
+
+Dump files left in the local download directory by an earlier run are deleted and downloaded
+fresh without asking when they are older than 24 hours (config `existing_files_max_age_hours`).
+Younger files are offered for reuse.
 
 ### Creating the database
 

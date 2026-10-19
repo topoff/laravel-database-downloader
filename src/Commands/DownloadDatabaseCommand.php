@@ -22,6 +22,7 @@ class DownloadDatabaseCommand extends Command
     {--source=backup : Data source: backup|staging-dump|staging-dump-structure|live-dump|live-dump-structure}
     {--dbName= : Use a different database name}
     {--import-from-local-file-path= : Import from a specific local file instead of downloading}
+    {--use-existing : Import already downloaded dump files regardless of their age, without asking}
     {--dropExisting : Drop the database before import if it exists}
     {--files : Download and import files from public/storage}
     {--table= : Import only a specific table}';
@@ -172,13 +173,16 @@ class DownloadDatabaseCommand extends Command
 
     protected function ensureLocalDirectoryExists(): void
     {
+        // The directory only holds dumps of earlier runs; a fresh download replaces them.
+        // Left-overs would get mixed into the new import, so a failed delete aborts.
+        // deleteDirectory() returns true even when single files could not be removed.
         if (File::exists($this->localPath)) {
-            // In non-interactive mode, always delete without asking
-            if (! $this->option('no-interaction') && ! $this->components->confirm('The local download directory already exists. Delete it and download fresh?', true)) {
-                throw new RuntimeException('Download cancelled by user. Local directory not cleared.');
-            }
-
             File::deleteDirectory($this->localPath);
+            clearstatcache();
+
+            if (is_dir($this->localPath)) {
+                throw new RuntimeException("Could not clear the local download directory: {$this->localPath}");
+            }
         }
 
         File::makeDirectory($this->localPath, 0755, true, true);
@@ -250,15 +254,15 @@ class DownloadDatabaseCommand extends Command
             return $this->processLocalFile($localFilePath);
         }
 
+        // Set before unpacking: a failed unzip/gunzip must not leave real data behind either.
+        $this->dumpFilesInUse = true;
+
         $existingFile = $this->handleExistingFiles();
         if ($existingFile !== null) {
-            $this->dumpFilesInUse = true;
-
             return $existingFile;
         }
 
         $this->ensureLocalDirectoryExists();
-        $this->dumpFilesInUse = true;
 
         return $this->downloadSqlData($this->source);
     }
@@ -276,15 +280,26 @@ class DownloadDatabaseCommand extends Command
             return null;
         }
 
+        // Stale dumps are replaced silently by a fresh download (ensureLocalDirectoryExists
+        // clears the directory) unless --use-existing asks for them explicitly.
+        if (! $this->option('use-existing') && $this->existingFilesAreStale($existingFiles)) {
+            $this->components->info(sprintf(
+                'Existing dump files are older than %d hours, downloading fresh',
+                $this->existingFilesMaxAgeHours()
+            ));
+
+            return null;
+        }
+
         // In non-interactive mode, use ALL existing sql files (a previous failed run
         // may have left the extracted multi-dump backup behind — importing only the
         // first would repeat the incomplete-import bug). Zip archives are ignored
         // here when extracted files exist; with only a zip, the old path applies.
-        if ($this->option('no-interaction')) {
+        if ($this->option('no-interaction') || $this->option('use-existing')) {
             $sqlFiles = array_values(array_filter($existingFiles, fn (string $file): bool => ! Str::endsWith($file, '.zip')));
 
             if ($sqlFiles === []) {
-                return $this->processLocalFile($existingFiles[0]);
+                return $this->extractBackupArchive($existingFiles[0]);
             }
 
             sort($sqlFiles);
@@ -321,7 +336,29 @@ class DownloadDatabaseCommand extends Command
         // Extract file path from choice (remove "Use: " prefix)
         $selectedFile = Str::after($choice, 'Use: ');
 
+        if (Str::endsWith($selectedFile, '.zip')) {
+            return $this->extractBackupArchive($selectedFile);
+        }
+
         return $this->processLocalFile($selectedFile);
+    }
+
+    /**
+     * The oldest file decides: rsync keeps the backup's mtime and unzip/gunzip keep
+     * the archive's, so the file age is the age of the backup itself.
+     *
+     * @param  array<string>  $files
+     */
+    protected function existingFilesAreStale(array $files): bool
+    {
+        $oldest = min(array_map(File::lastModified(...), $files));
+
+        return $oldest < time() - $this->existingFilesMaxAgeHours() * 3600;
+    }
+
+    protected function existingFilesMaxAgeHours(): int
+    {
+        return (int) config('database-downloader.existing_files_max_age_hours', 24);
     }
 
     /**
@@ -600,8 +637,19 @@ class DownloadDatabaseCommand extends Command
             }
         });
 
-        // Extract and decompress
-        $escapedZipFile = escapeshellarg("{$this->localPath}{$fileName}");
+        return $this->extractBackupArchive("{$this->localPath}{$fileName}");
+    }
+
+    /**
+     * Unpack a downloaded backup archive: its dumps land in db-dumps/ inside the
+     * local path (not next to the archive), all of them are imported.
+     */
+    protected function extractBackupArchive(string $zipFile): string
+    {
+        $this->validateFilePath($zipFile);
+
+        $escapedZipFile = escapeshellarg($zipFile);
+        $escapedLocalPath = escapeshellarg($this->localPath);
         $this->components->task('Extracting backup archive',
             fn (): ?string => $this->executeShellCommand("unzip -o {$escapedZipFile} -d {$escapedLocalPath}")
         );

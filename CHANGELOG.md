@@ -2,6 +2,19 @@
 
 All notable changes to `laravel-database-downloader` will be documented in this file.
 
+## v3.4.0 - 2026-10-19
+
+### Added
+
+- `db:download` checks the age of dump files left by an earlier run: older than 24 hours
+  (config `existing_files_max_age_hours`) they are deleted and downloaded fresh without asking.
+- `--use-existing` imports those files regardless of their age, without asking.
+
+### Changed behavior
+
+- No more "The local download directory already exists. Delete it?" prompt: choosing a fresh
+  download clears the directory directly.
+
 ## v3.3.1 - 2026-10-13
 
 ### Fixed
