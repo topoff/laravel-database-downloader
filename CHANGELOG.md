@@ -2,6 +2,15 @@
 
 All notable changes to `laravel-database-downloader` will be documented in this file.
 
+## v3.4.1 - 2026-11-18
+
+### Fixed
+
+- `db:download -v` no longer hangs after extracting a large backup archive: verbose mode shows
+  only the first 20 lines of a shell command's output plus a "… N more lines not shown" line.
+  The full list (one line per file of the archive) is rendered by Termwind through libxml2,
+  which takes quadratic time on libxml2 2.9.x (Ubuntu 24.04) — ~47 minutes for ~17k files.
+
 ## v3.4.0 - 2026-10-19
 
 ### Added

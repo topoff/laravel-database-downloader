@@ -174,10 +174,29 @@ trait InteractsWithMysql
         }
 
         if ($this->getOutput()->isVerbose() && $output !== []) {
-            $this->components->bulletList($output);
+            $this->components->bulletList($this->limitVerboseOutput($output));
         }
 
         return $output[0] ?? null;
+    }
+
+    /**
+     * Rendering a bullet list costs quadratic time on older libxml2 (Termwind parses it
+     * as HTML): unzip of a backup with ~17k files hung for ~47 minutes on libxml2 2.9.14.
+     *
+     * @param  array<int, string>  $output
+     * @return array<int, string>
+     */
+    protected function limitVerboseOutput(array $output): array
+    {
+        $maxLines = 20;
+        $hiddenLines = count($output) - $maxLines;
+
+        if ($hiddenLines <= 0) {
+            return $output;
+        }
+
+        return [...array_slice($output, 0, $maxLines), "… {$hiddenLines} more lines not shown"];
     }
 
     /**
